@@ -1,0 +1,9 @@
+numpy
+scipy
+pyyaml
+matplotlib
+Cython
+requests
+opencv-python
+pillow
+scikit-learn

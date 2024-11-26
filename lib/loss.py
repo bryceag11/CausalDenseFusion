@@ -6,11 +6,26 @@ import numpy as np
 import torch.nn as nn
 import random
 import torch.backends.cudnn as cudnn
-from lib.knn.__init__ import KNearestNeighbor
+
+
+def knn(x, y, k=1):
+    _, dim, x_size = x.shape
+    _, _, y_size = y.shape
+
+    x = x.detach().squeeze().transpose(0, 1)
+    y = y.detach().squeeze().transpose(0, 1)
+
+    xx = (x**2).sum(dim=1, keepdim=True).expand(x_size, y_size)
+    yy = (y**2).sum(dim=1, keepdim=True).expand(y_size, x_size).transpose(0, 1)
+
+    dist_mat = xx + yy - 2 * x.matmul(y.transpose(0, 1))
+    if k == 1:
+        return dist_mat.argmin(dim=0)
+    mink_idxs = dist_mat.argsort(dim=0)
+    return mink_idxs[: k]
 
 
 def loss_calculation(pred_r, pred_t, pred_c, target, model_points, idx, points, w, refine, num_point_mesh, sym_list):
-    knn = KNearestNeighbor(1)
     bs, num_p, _ = pred_c.size()
 
     pred_r = pred_r / (torch.norm(pred_r, dim=2).view(bs, num_p, 1))
@@ -42,7 +57,7 @@ def loss_calculation(pred_r, pred_t, pred_c, target, model_points, idx, points, 
             target = target[0].transpose(1, 0).contiguous().view(3, -1)
             pred = pred.permute(2, 0, 1).contiguous().view(3, -1)
             inds = knn(target.unsqueeze(0), pred.unsqueeze(0))
-            target = torch.index_select(target, 1, inds.view(-1) - 1)
+            target = torch.index_select(target, 1, inds.view(-1))
             target = target.view(3, bs * num_p, num_point_mesh).permute(1, 2, 0).contiguous()
             pred = pred.view(3, bs * num_p, num_point_mesh).permute(1, 2, 0).contiguous()
 
@@ -67,7 +82,6 @@ def loss_calculation(pred_r, pred_t, pred_c, target, model_points, idx, points, 
     new_target = torch.bmm((new_target - ori_t), ori_base).contiguous()
 
     # print('------------> ', dis[0][which_max[0]].item(), pred_c[0][which_max[0]].item(), idx[0].item())
-    del knn
     return loss, dis[0][which_max[0]], new_points.detach(), new_target.detach()
 
 

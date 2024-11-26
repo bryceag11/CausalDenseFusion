@@ -16,7 +16,7 @@ import scipy.io as scio
 
 
 class PoseDataset(data.Dataset):
-    def __init__(self, mode, num_pt, add_noise, root, noise_trans, refine):
+    def __init__(self, mode, num_pt, add_noise, root, noise_trans, refine, ext='png'):
         if mode == 'train':
             self.path = 'datasets/ycb/dataset_config/train_data_list.txt'
         elif mode == 'test':
@@ -25,6 +25,7 @@ class PoseDataset(data.Dataset):
         self.root = root
         self.add_noise = add_noise
         self.noise_trans = noise_trans
+        self.ext = ext
 
         self.list = []
         self.real = []
@@ -95,9 +96,9 @@ class PoseDataset(data.Dataset):
         print(len(self.list))
 
     def __getitem__(self, index):
-        img = Image.open('{0}/{1}-color.png'.format(self.root, self.list[index]))
-        depth = np.array(Image.open('{0}/{1}-depth.png'.format(self.root, self.list[index])))
-        label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, self.list[index])))
+        img = Image.open('{0}/{1}-color.{2}'.format(self.root, self.list[index], self.ext))
+        depth = np.array(Image.open('{0}/{1}-depth.png'.format(self.root, self.list[index], self.ext)))
+        label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, self.list[index], self.ext)))
         meta = scio.loadmat('{0}/{1}-meta.mat'.format(self.root, self.list[index]))
 
         if self.list[index][:8] != 'data_syn' and int(self.list[index][5:9]) >= 60:
@@ -117,9 +118,9 @@ class PoseDataset(data.Dataset):
         if self.add_noise:
             for k in range(5):
                 seed = random.choice(self.syn)
-                front = np.array(self.trancolor(Image.open('{0}/{1}-color.png'.format(self.root, seed)).convert("RGB")))
+                front = np.array(self.trancolor(Image.open('{0}/{1}-color.{2}'.format(self.root, seed, self.ext)).convert("RGB")))
                 front = np.transpose(front, (2, 0, 1))
-                f_label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, seed)))
+                f_label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, seed, self.ext)))
                 front_label = np.unique(f_label).tolist()[1:]
                 if len(front_label) < self.front_num:
                    continue
@@ -154,7 +155,7 @@ class PoseDataset(data.Dataset):
 
         if self.list[index][:8] == 'data_syn':
             seed = random.choice(self.real)
-            back = np.array(self.trancolor(Image.open('{0}/{1}-color.png'.format(self.root, seed)).convert("RGB")))
+            back = np.array(self.trancolor(Image.open('{0}/{1}-color.{2}'.format(self.root, seed, self.ext)).convert("RGB")))
             back = np.transpose(back, (2, 0, 1))[:, rmin:rmax, cmin:cmax]
             img_masked = back * mask_back[rmin:rmax, cmin:cmax] + img
         else:
