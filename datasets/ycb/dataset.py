@@ -29,7 +29,7 @@ class PoseDataset(data.Dataset):
 
         self.list = []
         self.real = []
-        self.syn = []
+        # self.syn = []
         input_file = open(self.path)
         while 1:
             input_line = input_file.readline()
@@ -39,14 +39,14 @@ class PoseDataset(data.Dataset):
                 input_line = input_line[:-1]
             if input_line[:5] == 'data/':
                 self.real.append(input_line)
-            else:
-                self.syn.append(input_line)
+            # else:
+            #     self.syn.append(input_line)
             self.list.append(input_line)
         input_file.close()
 
         self.length = len(self.list)
-        self.len_real = len(self.real)
-        self.len_syn = len(self.syn)
+        # self.len_real = len(self.real)
+        # self.len_syn = len(self.syn)
 
         class_file = open('datasets/ycb/dataset_config/classes.txt')
         class_id = 1
@@ -101,7 +101,7 @@ class PoseDataset(data.Dataset):
         label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, self.list[index], self.ext)))
         meta = scio.loadmat('{0}/{1}-meta.mat'.format(self.root, self.list[index]))
 
-        if self.list[index][:8] != 'data_syn' and int(self.list[index][5:9]) >= 60:
+        if int(self.list[index][5:9]) >= 60:
             cam_cx = self.cam_cx_2
             cam_cy = self.cam_cy_2
             cam_fx = self.cam_fx_2
@@ -116,26 +116,28 @@ class PoseDataset(data.Dataset):
 
         add_front = False
         if self.add_noise:
-            for k in range(5):
-                seed = random.choice(self.syn)
-                front = np.array(self.trancolor(Image.open('{0}/{1}-color.{2}'.format(self.root, seed, self.ext)).convert("RGB")))
-                front = np.transpose(front, (2, 0, 1))
-                f_label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, seed, self.ext)))
-                front_label = np.unique(f_label).tolist()[1:]
-                if len(front_label) < self.front_num:
-                   continue
-                front_label = random.sample(front_label, self.front_num)
-                for f_i in front_label:
-                    mk = ma.getmaskarray(ma.masked_not_equal(f_label, f_i))
-                    if f_i == front_label[0]:
-                        mask_front = mk
-                    else:
-                        mask_front = mask_front * mk
-                t_label = label * mask_front
-                if len(t_label.nonzero()[0]) > 1000:
-                    label = t_label
-                    add_front = True
-                    break
+            # for k in range(5):
+            #     seed = random.choice(self.syn)
+            #     front = np.array(self.trancolor(Image.open('{0}/{1}-color.{2}'.format(self.root, seed, self.ext)).convert("RGB")))
+            #     front = np.transpose(front, (2, 0, 1))
+            #     f_label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, seed, self.ext)))
+            #     front_label = np.unique(f_label).tolist()[1:]
+            #     if len(front_label) < self.front_num:
+            #        continue
+            #     front_label = random.sample(front_label, self.front_num)
+            #     for f_i in front_label:
+            #         mk = ma.getmaskarray(ma.masked_not_equal(f_label, f_i))
+            #         if f_i == front_label[0]:
+            #             mask_front = mk
+            #         else:
+            #             mask_front = mask_front * mk
+            #     t_label = label * mask_front
+            #     if len(t_label.nonzero()[0]) > 1000:
+            #         label = t_label
+            #         add_front = True
+            #         break
+            img = self.trancolor(img)
+
 
         obj = meta['cls_indexes'].flatten().astype(np.int32)
 
@@ -152,24 +154,8 @@ class PoseDataset(data.Dataset):
 
         rmin, rmax, cmin, cmax = get_bbox(mask_label)
         img = np.transpose(np.array(img)[:, :, :3], (2, 0, 1))[:, rmin:rmax, cmin:cmax]
+        img_masked = img
 
-        if self.list[index][:8] == 'data_syn':
-            seed = random.choice(self.real)
-            back = np.array(self.trancolor(Image.open('{0}/{1}-color.{2}'.format(self.root, seed, self.ext)).convert("RGB")))
-            back = np.transpose(back, (2, 0, 1))[:, rmin:rmax, cmin:cmax]
-            img_masked = back * mask_back[rmin:rmax, cmin:cmax] + img
-        else:
-            img_masked = img
-
-        if self.add_noise and add_front:
-            img_masked = img_masked * mask_front[rmin:rmax, cmin:cmax] + front[:, rmin:rmax, cmin:cmax] * ~(mask_front[rmin:rmax, cmin:cmax])
-
-        if self.list[index][:8] == 'data_syn':
-            img_masked = img_masked + np.random.normal(loc=0.0, scale=7.0, size=img_masked.shape)
-
-        # p_img = np.transpose(img_masked, (1, 2, 0))
-        # scipy.misc.imsave('temp/{0}_input.png'.format(index), p_img)
-        # scipy.misc.imsave('temp/{0}_label.png'.format(index), mask[rmin:rmax, cmin:cmax].astype(np.int32))
 
         target_r = meta['poses'][:, :, idx][:, 0:3]
         target_t = np.array([meta['poses'][:, :, idx][:, 3:4].flatten()])
@@ -197,11 +183,6 @@ class PoseDataset(data.Dataset):
         if self.add_noise:
             cloud = np.add(cloud, add_t)
 
-        # fw = open('temp/{0}_cld.xyz'.format(index), 'w')
-        # for it in cloud:
-        #    fw.write('{0} {1} {2}\n'.format(it[0], it[1], it[2]))
-        # fw.close()
-
         dellist = [j for j in range(0, len(self.cld[obj[idx]]))]
         if self.refine:
             dellist = random.sample(dellist, len(self.cld[obj[idx]]) - self.num_pt_mesh_large)
@@ -209,21 +190,11 @@ class PoseDataset(data.Dataset):
             dellist = random.sample(dellist, len(self.cld[obj[idx]]) - self.num_pt_mesh_small)
         model_points = np.delete(self.cld[obj[idx]], dellist, axis=0)
 
-        # fw = open('temp/{0}_model_points.xyz'.format(index), 'w')
-        # for it in model_points:
-        #    fw.write('{0} {1} {2}\n'.format(it[0], it[1], it[2]))
-        # fw.close()
-
         target = np.dot(model_points, target_r.T)
         if self.add_noise:
             target = np.add(target, target_t + add_t)
         else:
             target = np.add(target, target_t)
-        
-        # fw = open('temp/{0}_tar.xyz'.format(index), 'w')
-        # for it in target:
-        #    fw.write('{0} {1} {2}\n'.format(it[0], it[1], it[2]))
-        # fw.close()
         
         return torch.from_numpy(cloud.astype(np.float32)), \
                torch.LongTensor(choose.astype(np.int32)), \
