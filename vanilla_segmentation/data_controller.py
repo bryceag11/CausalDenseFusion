@@ -50,22 +50,22 @@ class SegDataset(data.Dataset):
         else:
             rgb = np.array(self.trancolor(Image.open('{0}/{1}-color.png'.format(self.root, self.path[index])).convert("RGB")))
 
-        if self.path[index][:8] == 'data_syn':
-            rgb = Image.open('{0}/{1}-color.png'.format(self.root, self.path[index])).convert("RGB")
-            rgb = ImageEnhance.Brightness(rgb).enhance(1.5).filter(ImageFilter.GaussianBlur(radius=0.8))
-            rgb = np.array(self.trancolor(rgb))
-            seed = random.randint(0, self.back_len - 10)
-            back = np.array(self.trancolor(Image.open('{0}/{1}-color.png'.format(self.root, self.path[seed])).convert("RGB")))
-            back_label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, self.path[seed])))
-            mask = ma.getmaskarray(ma.masked_equal(label, 0))
-            back = np.transpose(back, (2, 0, 1))
-            rgb = np.transpose(rgb, (2, 0, 1))
-            rgb = rgb + np.random.normal(loc=0.0, scale=5.0, size=rgb.shape)
-            rgb = back * mask + rgb
-            label = back_label * mask + label
-            rgb = np.transpose(rgb, (1, 2, 0))
-            #scipy.misc.imsave('embedding_final/rgb_{0}.png'.format(index), rgb)
-            #scipy.misc.imsave('embedding_final/label_{0}.png'.format(index), label)
+        # if self.path[index][:8] == 'data_syn':
+        #     rgb = Image.open('{0}/{1}-color.png'.format(self.root, self.path[index])).convert("RGB")
+        #     rgb = ImageEnhance.Brightness(rgb).enhance(1.5).filter(ImageFilter.GaussianBlur(radius=0.8))
+        #     rgb = np.array(self.trancolor(rgb))
+        #     seed = random.randint(0, self.back_len - 10)
+        #     back = np.array(self.trancolor(Image.open('{0}/{1}-color.png'.format(self.root, self.path[seed])).convert("RGB")))
+        #     back_label = np.array(Image.open('{0}/{1}-label.png'.format(self.root, self.path[seed])))
+        #     mask = ma.getmaskarray(ma.masked_equal(label, 0))
+        #     back = np.transpose(back, (2, 0, 1))
+        #     rgb = np.transpose(rgb, (2, 0, 1))
+        #     rgb = rgb + np.random.normal(loc=0.0, scale=5.0, size=rgb.shape)
+        #     rgb = back * mask + rgb
+        #     label = back_label * mask + label
+        #     rgb = np.transpose(rgb, (1, 2, 0))
+        #     #scipy.misc.imsave('embedding_final/rgb_{0}.png'.format(index), rgb)
+        #     #scipy.misc.imsave('embedding_final/label_{0}.png'.format(index), label)
             
         if self.use_noise:
             choice = random.randint(0, 3)
