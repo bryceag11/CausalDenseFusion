@@ -134,7 +134,7 @@ while 1:
     class_id += 1
 
 for now in range(0, 2949):
-    img = Image.open('{0}/{1}-color.png'.format(opt.dataset_root, testlist[now]))
+    img = Image.open('{0}/{1}-color.jpg'.format(opt.dataset_root, testlist[now]))
     depth = np.array(Image.open('{0}/{1}-depth.png'.format(opt.dataset_root, testlist[now])))
     posecnn_meta = scio.loadmat('{0}/results_PoseCNN_RSS2018/{1}.mat'.format(ycb_toolbox_dir, '%06d' % now))
     label = np.array(posecnn_meta['labels'])

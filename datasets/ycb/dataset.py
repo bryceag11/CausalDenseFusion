@@ -16,7 +16,7 @@ import scipy.io as scio
 
 
 class PoseDataset(data.Dataset):
-    def __init__(self, mode, num_pt, add_noise, root, noise_trans, refine, ext='png'):
+    def __init__(self, mode, num_pt, add_noise, root, noise_trans, refine, ext='jpg'):
         if mode == 'train':
             self.path = 'datasets/ycb/dataset_config/train_data_list.txt'
         elif mode == 'test':
