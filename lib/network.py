@@ -208,22 +208,34 @@ class PoseRefineNet(nn.Module):
 
 
 class CausalRefineNet(nn.Module):
-    def __init__(self):
+    def __init__(self, num_points, num_obj, max_rotation_angle=np.pi/6, translation_min=-0.5, translation_max=0.5, num_iterations=2):
         super(CausalRefineNet, self).__init__()
-        self.num_points = 1000  # Number of points to consider
-        self.num_iterations = 2  # Number of refinement iterations
+        self.num_points = num_points
+        #self.num_obj = num_obj
+        self.num_iterations = num_iterations 
         
         # SCM components
         self.visibility_estimator = VisibilityModule()
         self.geometric_analyzer = GeometricModule()
         self.pose_residual = ResidualModule()
         self.confidence_updater = ConfidenceModule()
+
+        # Define translation bounds (example values)
+        self.translation_min = translation_min  # meters
+        self.translation_max = translation_max  # meters
+        
+        # Define maximum rotation angle per iteration
+        self.max_rotation_angle = max_rotation_angle  # radians,e.g., np.pi / 6 
         
     def forward(self, point_cloud, prev_pose, prev_confidence):
         """
-        point_cloud: Nx3 transformed point cloud
-        prev_pose: 6D pose [R|t]
-        prev_confidence: previous confidence score
+         Args:
+            point_cloud: (B, N, 3) transformed point cloud
+            prev_pose: (B, 7) pose [quat + trans]
+            prev_confidence: (B, 1) previous confidence score
+        Returns:
+            current_pose: (B, 7) refined pose
+            current_conf: (B, 1) updated confidence score
         """
         batch_size = point_cloud.size(0)
         
@@ -254,7 +266,73 @@ class CausalRefineNet(nn.Module):
         # Implement rotation matrix orthogonality constraints
         # Implement translation bounds
         # Add any object-specific constraints
+      
+        quat = pose[:, :4]
+        trans = pose[:, 4:]
+
+        # Normalize quaternions
+        quat = self.normalize_quaternion(quat)
+
+        # Limit rotation magnitude
+        quat = self.limit_rotation(quat, max_angle=self.max_rotation_angle)
+
+        # Limit translation
+        trans = self.limit_translation(trans, 
+                                  min_val=self.translation_min, 
+                                  max_val=self.translation_max)
+
+        # Combine constrained quaternion and translation
+        constrained_pose = torch.cat([quat, trans], dim=1)
+
         return constrained_pose
+
+    def normalize_quaternion(self,quaternion):
+        """Normalize quaternions to unit length."""
+        return F.normalize(quaternion, p=2, dim=1)
+
+    def quaternion_to_angle(self,quaternion):
+        """Convert quaternion to rotation angle in radians."""
+        # Quaternion format: [x, y, z, w]
+        # Angle = 2 * acos(w)
+        w = quaternion[:, 3]
+        angle = 2 * torch.acos(torch.clamp(w, -1.0, 1.0))
+        return angle
+
+    def limit_rotation(self, quaternion, max_angle):
+        """
+        Limit the rotation angle represented by the quaternion to max_angle radians.
+        Args:
+            quaternion: (B, 4) normalized quaternion [x, y, z, w]
+            max_angle: maximum allowable rotation angle in radians
+        Returns:
+            limited_quaternion: (B, 4) limited quaternion
+        """
+        angle = self.quaternion_to_angle(quaternion)
+        # Avoid division by zero
+        angle = torch.clamp(angle, min=1e-6)
+        # Compute scaling factor for angle
+        scale = torch.ones_like(angle)
+        mask = angle > max_angle
+        scale[mask] = max_angle / angle[mask]
+        # Compute new quaternion
+        xyz = quaternion[:, :3] * scale.unsqueeze(1)
+        w = torch.clamp(quaternion[:, 3], -1.0, 1.0)
+        # Re-normalize after scaling
+        limited_quaternion = torch.cat([xyz, w.unsqueeze(1)], dim=1)
+        limited_quaternion = normalize_quaternion(limited_quaternion)
+        return limited_quaternion
+
+    def limit_translation(self,translation, min_val, max_val):
+        """
+        Clamp the translation vectors to be within [min_val, max_val] along each axis.
+        Args:
+            translation: (B, 3) translation vectors
+            min_val: minimum translation value
+            max_val: maximum translation value
+        Returns:
+            limited_translation: (B, 3) clamped translation vectors
+        """
+        return torch.clamp(translation, min=min_val, max=max_val)
 
 
 class VisibilityModule(nn.Module):
@@ -449,53 +527,160 @@ class ConfidenceModule(nn.Module):
         
         return new_confidence
 
-# Utility functions needed:
-def quaternion_to_matrix(quaternion):
-    """Convert quaternion to rotation matrix"""
-    # Implementation
-    pass
+import torch
 
-def project_to_2d(points_3d):
-    """Project 3D points to 2D using camera intrinsics"""
-    # Implementation
-    pass
+def quaternion_to_matrix(quaternion):
+    """
+    Convert quaternion to a 3x3 rotation matrix.
+    Args:
+        quaternion: Tensor of shape (B, 4), where each quaternion is [x, y, z, w].
+    Returns:
+        Tensor of shape (B, 3, 3), representing the corresponding rotation matrices.
+    """
+    x, y, z, w = quaternion.unbind(dim=-1)
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    ww = w * w
+    xy = x * y
+    xz = x * z
+    yz = y * z
+    wx = w * x
+    wy = w * y
+    wz = w * z
+
+    matrix = torch.stack([
+        1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy),
+        2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx),
+        2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)
+    ], dim=-1).view(-1, 3, 3)
+
+    return matrix
+
+def project_to_2d(points_3d, intrinsics=None):
+    """
+    Project 3D points to 2D using camera intrinsics.
+    Args:
+        points_3d: Tensor of shape (B, N, 3).
+        intrinsics: Camera intrinsic matrix of shape (3, 3).
+                    Defaults to a normalized pinhole camera model if not provided.
+    Returns:
+        Tensor of shape (B, N, 2), representing 2D projections.
+    """
+    if intrinsics is None:
+        intrinsics = torch.tensor([[1, 0, 0],
+                                   [0, 1, 0],
+                                   [0, 0, 1]], dtype=points_3d.dtype, device=points_3d.device)
+    
+    points_3d_homo = torch.cat([points_3d, torch.ones_like(points_3d[..., :1])], dim=-1)  # Homogeneous coordinates
+    projected_points = torch.bmm(points_3d_homo, intrinsics.t())
+    projected_points = projected_points[..., :2] / projected_points[..., 2:3]  # Normalize by z
+    return projected_points
 
 def compute_depth_map(projected_points, points_3d):
-    """Compute depth map from projected points"""
-    # Implementation
-    pass
+    """
+    Compute depth map from projected points.
+    Args:
+        projected_points: Tensor of shape (B, N, 2), 2D projections of points.
+        points_3d: Tensor of shape (B, N, 3), original 3D points.
+    Returns:
+        Depth map of shape (B, N).
+    """
+    return points_3d[..., 2]  # The z-coordinate represents depth.
 
 def find_knn(points, k):
-    """Find k nearest neighbors for each point"""
-    # Implementation
-    pass
+    """
+    Find k nearest neighbors for each point.
+    Args:
+        points: Tensor of shape (B, N, 3).
+        k: Number of nearest neighbors to find.
+    Returns:
+        Indices of k nearest neighbors, of shape (B, N, k).
+    """
+    dists = torch.cdist(points, points)  # Compute pairwise distances
+    knn_idx = dists.topk(k, largest=False).indices  # Indices of the k nearest neighbors
+    return knn_idx
 
 def compute_local_features(points, knn_idx):
-    """Compute local neighborhood features"""
-    # Implementation
-    pass
+    """
+    Compute local neighborhood features.
+    Args:
+        points: Tensor of shape (B, N, 3).
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+    Returns:
+        Local features tensor of shape (B, N, k, 3).
+    """
+    batch_size, num_points, _ = points.shape
+    k = knn_idx.shape[-1]
+    neighbors = points.unsqueeze(2).expand(batch_size, num_points, k, -1)
+    local_features = neighbors.gather(1, knn_idx.unsqueeze(-1).expand(-1, -1, -1, 3))
+    return local_features
 
 def estimate_normals(points, knn_idx):
-    """Estimate surface normals"""
-    # Implementation
-    pass
+    """
+    Estimate surface normals for points.
+    Args:
+        points: Tensor of shape (B, N, 3).
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+    Returns:
+        Normals tensor of shape (B, N, 3).
+    """
+    local_points = compute_local_features(points, knn_idx)
+    pca_centroids = local_points.mean(dim=2, keepdim=True)
+    centered = local_points - pca_centroids
+    covariance_matrix = torch.einsum('bnik,bnij->bnkj', centered, centered)
+    _, _, vh = torch.linalg.svd(covariance_matrix)
+    normals = vh[..., -1]  # Smallest singular value's vector
+    return normals
 
 def estimate_curvature(points, knn_idx):
-    """Estimate local curvature"""
-    # Implementation
-    pass
+    """
+    Estimate local curvature of points.
+    Args:
+        points: Tensor of shape (B, N, 3).
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+    Returns:
+        Curvature tensor of shape (B, N, 1).
+    """
+    local_points = compute_local_features(points, knn_idx)
+    distances = torch.norm(local_points - points.unsqueeze(2), dim=-1)
+    curvature = distances.mean(dim=2, keepdim=True)  # Approximate curvature by mean distance
+    return curvature
 
 def normalize_quaternion(quaternion):
-    """Normalize quaternion to unit length"""
-    # Implementation
-    pass
+    """
+    Normalize quaternion to unit length.
+    Args:
+        quaternion: Tensor of shape (B, 4).
+    Returns:
+        Normalized quaternion of shape (B, 4).
+    """
+    return quaternion / torch.norm(quaternion, dim=-1, keepdim=True)
 
 def quaternion_magnitude(quaternion):
-    """Compute quaternion rotation magnitude"""
-    # Implementation
-    pass
+    """
+    Compute quaternion rotation magnitude.
+    Args:
+        quaternion: Tensor of shape (B, 4).
+    Returns:
+        Magnitude of the quaternion rotations.
+    """
+    w = quaternion[..., 3]
+    angle = 2 * torch.acos(torch.clamp(w, -1.0, 1.0))  # Compute rotation angle
+    return angle
 
 def clip_rotation(quaternion, max_angle):
-    """Clip rotation to maximum angle"""
-    # Implementation
-    pass
+    """
+    Clip rotation represented by quaternion to maximum angle.
+    Args:
+        quaternion: Tensor of shape (B, 4).
+        max_angle: Maximum allowable rotation angle in radians.
+    Returns:
+        Quaternion clipped to the maximum angle.
+    """
+    angle = quaternion_magnitude(quaternion)
+    scale = torch.ones_like(angle)
+    mask = angle > max_angle
+    scale[mask] = max_angle / angle[mask]
+    quaternion = quaternion * scale.unsqueeze(-1)
+    return normalize_quaternion(quaternion)
