@@ -90,3 +90,4 @@ class Loss_refine(_Loss):
 
     def forward(self, pred_r, pred_t, target, model_points, idx, points):
         return loss_calculation(pred_r, pred_t, target, model_points, idx, points, self.num_pt_mesh, self.sym_list)
+        

@@ -48,7 +48,7 @@ iteration = 2
 bs = 1
 dataset_config_dir = 'datasets/ycb/dataset_config'
 ycb_toolbox_dir = 'YCB_Video_toolbox'
-result_wo_refine_dir = 'experiments/eval_result/ycb/Densefusion_wo_refine_result'
+result_wo__dir = 'experiments/eval_result/ycb/Densefusion_wo_refine_result'
 result_refine_dir = 'experiments/eval_result/ycb/Densefusion_iterative_result'
 
 def get_bbox(posecnn_rois):
