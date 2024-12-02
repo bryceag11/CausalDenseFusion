@@ -64,8 +64,8 @@ class PoseNetFeat(nn.Module):
 
         ap_x = self.ap1(x)
 
-        ap_x = ap_x.view(-1, 1024, 1).repeat(1, 1, self.num_points)
-        return torch.cat([pointfeat_1, pointfeat_2, ap_x], 1) #128 + 256 + 1024
+        ap_x = ap_x.view(-1, 1024, 1).repeat(1, 1, self.num_points) # ap_x: (B, 1024, N)
+        return torch.cat([pointfeat_1, pointfeat_2, ap_x], 1) # (B, 128 + 256 + 1024, N) = (B, 1408, N)
 
 class PoseNet(nn.Module):
     def __init__(self, num_points, num_obj):
@@ -90,7 +90,7 @@ class PoseNet(nn.Module):
         self.conv4_t = torch.nn.Conv1d(128, num_obj*3, 1) #translation
         self.conv4_c = torch.nn.Conv1d(128, num_obj*1, 1) #confidence
 
-        self.num_obj = num_obj
+        self.num_obj = num_obj 
 
     def forward(self, img, x, choose, obj):
         out_img = self.cnn(img)
@@ -139,33 +139,35 @@ class PoseRefineNetFeat(nn.Module):
         self.conv1 = torch.nn.Conv1d(3, 64, 1)
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
 
-        self.e_conv1 = torch.nn.Conv1d(32, 64, 1)
-        self.e_conv2 = torch.nn.Conv1d(64, 128, 1)
+        self.e_conv1 = torch.nn.Conv1d(32, 64, 1) # (B, 64, N)
+        self.e_conv2 = torch.nn.Conv1d(64, 128, 1) # (B, 128, N)
 
         self.conv5 = torch.nn.Conv1d(384, 512, 1)
-        self.conv6 = torch.nn.Conv1d(512, 1024, 1)
+        self.conv6 = torch.nn.Conv1d(512, 1024, 1) # (B, 1024, N)
 
-        self.ap1 = torch.nn.AvgPool1d(num_points)
+        self.ap1 = torch.nn.AvgPool1d(num_points) # Pooling input (B, 1024, 1)
         self.num_points = num_points
 
     def forward(self, x, emb):
-        x = F.relu(self.conv1(x))
-        emb = F.relu(self.e_conv1(emb))
-        pointfeat_1 = torch.cat([x, emb], dim=1)
+        # x: (B, 3, N)
+        # emb: (B, 32, N)
+        x = F.relu(self.conv1(x)) # (B, 64, N)
+        emb = F.relu(self.e_conv1(emb)) # Embedding (B, 64, N)
+        pointfeat_1 = torch.cat([x, emb], dim=1) # (B, 128, N)
 
-        x = F.relu(self.conv2(x))
-        emb = F.relu(self.e_conv2(emb))
-        pointfeat_2 = torch.cat([x, emb], dim=1)
+        x = F.relu(self.conv2(x)) # (B, 128, N)
+        emb = F.relu(self.e_conv2(emb)) # (B, 128, N)
+        pointfeat_2 = torch.cat([x, emb], dim=1) # (B, 256, N)
 
-        pointfeat_3 = torch.cat([pointfeat_1, pointfeat_2], dim=1)
+        pointfeat_3 = torch.cat([pointfeat_1, pointfeat_2], dim=1) # (B, 384, N)
 
-        x = F.relu(self.conv5(pointfeat_3))
-        x = F.relu(self.conv6(x))
+        x = F.relu(self.conv5(pointfeat_3)) # (B, 512, N)
+        x = F.relu(self.conv6(x)) # (B, 1024, N)
 
-        ap_x = self.ap1(x)
+        ap_x = self.ap1(x) # Pooling output (B, 1024, 1)
 
-        ap_x = ap_x.view(-1, 1024)
-        return ap_x
+        ap_x = ap_x.view(-1, 1024) # Reshaping (B, 1024) 
+        return ap_x # Information across all points so object-level
 
 class PoseRefineNet(nn.Module):
     def __init__(self, num_points, num_obj):
@@ -185,25 +187,28 @@ class PoseRefineNet(nn.Module):
         self.num_obj = num_obj
 
     def forward(self, x, emb, obj):
+        # x: (B, 3, N)
+        # emb: (B, 32, N)
+        # obj: (B, num_obj)
         bs = x.size()[0]
         
-        x = x.transpose(2, 1).contiguous()
-        ap_x = self.feat(x, emb)
+        x = x.transpose(2, 1).contiguous() # (B, N, 3)
+        ap_x = self.feat(x, emb) #(B, 1024)
+ 
+        rx = F.relu(self.conv1_r(ap_x)) # (B, 512)
+        tx = F.relu(self.conv1_t(ap_x)) # (B, 512)
 
-        rx = F.relu(self.conv1_r(ap_x))
-        tx = F.relu(self.conv1_t(ap_x))   
+        rx = F.relu(self.conv2_r(rx)) # (B, 128)
+        tx = F.relu(self.conv2_t(tx)) # (B, 128)
 
-        rx = F.relu(self.conv2_r(rx))
-        tx = F.relu(self.conv2_t(tx))
-
-        rx = self.conv3_r(rx).view(bs, self.num_obj, 4)
-        tx = self.conv3_t(tx).view(bs, self.num_obj, 3)
+        rx = self.conv3_r(rx).view(bs, self.num_obj, 4) # (B, num_obj, 4)
+        tx = self.conv3_t(tx).view(bs, self.num_obj, 3) # (B, num_obj, 3)
 
         b = 0
-        out_rx = torch.index_select(rx[b], 0, obj[b])
-        out_tx = torch.index_select(tx[b], 0, obj[b])
+        out_rx = torch.index_select(rx[b], 0, obj[b]) # (4, num_obj)
+        out_tx = torch.index_select(tx[b], 0, obj[b]) # (3, num_obj)
 
-        return out_rx, out_tx
+        return out_rx, out_tx # (num_obj, 4) (num_obj, 3)
 
 
 
