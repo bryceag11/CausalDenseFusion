@@ -201,12 +201,12 @@ class PoseRefineNet(nn.Module):
         rx = F.relu(self.conv2_r(rx)) # (B, 128)
         tx = F.relu(self.conv2_t(tx)) # (B, 128)
 
-        rx = self.conv3_r(rx).view(bs, self.num_obj, 4) # (B, num_obj, 4)
-        tx = self.conv3_t(tx).view(bs, self.num_obj, 3) # (B, num_obj, 3)
+        rx = self.conv3_r(rx).view(bs, self.num_obj, 4) # (B, num_obj, 4) quaternion per object
+        tx = self.conv3_t(tx).view(bs, self.num_obj, 3) # (B, num_obj, 3) 
 
         b = 0
-        out_rx = torch.index_select(rx[b], 0, obj[b]) # (4, num_obj)
-        out_tx = torch.index_select(tx[b], 0, obj[b]) # (3, num_obj)
+        out_rx = torch.index_select(rx[b], 0, obj[b]) # (1, 4) single quaternion for selected object
+        out_tx = torch.index_select(tx[b], 0, obj[b]) # (1, 3)
 
         return out_rx, out_tx # (num_obj, 4) (num_obj, 3)
 
