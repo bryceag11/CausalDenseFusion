@@ -345,24 +345,35 @@ class VisibilityModule(nn.Module):
         Estimate point visibility given current pose
         Args:
             point_cloud: (B, N, 3) transformed point cloud
-            pose: (B, 7) pose [quat + trans]
+            pose: (B, 7, N) pose [quat + trans] for each point
         Returns:
             vis_mask: (B, N) boolean visibility mask
         """
         batch_size, num_points, _ = point_cloud.shape
         
-        # Convert pose to transformation matrix
-        R = quaternion_to_matrix(pose[:, :4])
-        t = pose[:, 4:]
+        # Split pose into rotation and translation
+        quat = pose[:, :4, :]  # (B, 4, N)
+        trans = pose[:, 4:, :]  # (B, 3, N)
+        
+        # Convert quaternions to rotation matrices
+        R = quaternion_to_matrix(quat)  # (B, 3, 3, N)
+        
+        # Reshape point cloud for batch matrix multiplication
+        points_expanded = point_cloud.transpose(1, 2).unsqueeze(-1)  # (B, 3, 1, N)
         
         # Transform points to camera frame
-        transformed_points = torch.bmm(point_cloud, R.transpose(1, 2)) + t.unsqueeze(1)
+        # Matmul with R: (B, 3, 3, N) @ (B, 3, 1, N) -> (B, 3, 1, N)
+        transformed_points = torch.matmul(R, points_expanded).squeeze(-2)  # (B, 3, N)
+        transformed_points = transformed_points + trans  # (B, 3, N)
+        
+        # Convert to (B, N, 3) for projection
+        transformed_points = transformed_points.transpose(1, 2)  # (B, N, 3)
         
         # Project points to 2D
-        projected_points = project_to_2d(transformed_points)  # Implement camera projection
+        projected_points = project_to_2d(transformed_points)  # (B, N, 2)
         
         # Compute depth map from projected points
-        depth_map = compute_depth_map(projected_points, transformed_points)
+        depth_map = compute_depth_map(projected_points, transformed_points)  # (B, N)
         
         # Check depth consistency
         point_depths = transformed_points[..., 2]
@@ -527,17 +538,31 @@ class ConfidenceModule(nn.Module):
         
         return new_confidence
 
-import torch
-
 def quaternion_to_matrix(quaternion):
     """
     Convert quaternion to a 3x3 rotation matrix.
     Args:
-        quaternion: Tensor of shape (B, 4), where each quaternion is [x, y, z, w].
+        quaternion: Tensor of shape (B, 4, N) or (B, 4), where each quaternion is [x, y, z, w]
     Returns:
-        Tensor of shape (B, 3, 3), representing the corresponding rotation matrices.
+        Tensor of shape (B, 3, 3, N) or (B, 3, 3), representing the corresponding rotation matrices.
     """
-    x, y, z, w = quaternion.unbind(dim=-1)
+    if quaternion.dim() == 3:
+        # Handle (B, 4, N) shape
+        B, _, N = quaternion.shape
+        quaternion = quaternion.permute(0, 2, 1)  # (B, N, 4)
+        x = quaternion[..., 0]
+        y = quaternion[..., 1]
+        z = quaternion[..., 2]
+        w = quaternion[..., 3]
+    else:
+        # Handle (B, 4) shape
+        B = quaternion.shape[0]
+        N = 1
+        x = quaternion[:, 0]
+        y = quaternion[:, 1]
+        z = quaternion[:, 2]
+        w = quaternion[:, 3]
+
     xx = x * x
     yy = y * y
     zz = z * z
@@ -553,7 +578,12 @@ def quaternion_to_matrix(quaternion):
         1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy),
         2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx),
         2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)
-    ], dim=-1).view(-1, 3, 3)
+    ], dim=-1).view(B, -1, 3, 3)
+
+    if N > 1:
+        # For point-wise case, reshape to (B, N, 3, 3)
+        matrix = matrix.view(B, N, 3, 3)
+        matrix = matrix.permute(0, 2, 3, 1)  # (B, 3, 3, N)
 
     return matrix
 
@@ -561,126 +591,229 @@ def project_to_2d(points_3d, intrinsics=None):
     """
     Project 3D points to 2D using camera intrinsics.
     Args:
-        points_3d: Tensor of shape (B, N, 3).
-        intrinsics: Camera intrinsic matrix of shape (3, 3).
-                    Defaults to a normalized pinhole camera model if not provided.
+        points_3d: Tensor of shape (B, N, 3) or (B, 3, N)
+        intrinsics: Camera intrinsic matrix of shape (3, 3)
     Returns:
-        Tensor of shape (B, N, 2), representing 2D projections.
+        Tensor of shape (B, N, 2), representing 2D projections
     """
+    if points_3d.shape[1] == 3:
+        points_3d = points_3d.transpose(1, 2)  # Convert to (B, N, 3)
+        
     if intrinsics is None:
         intrinsics = torch.tensor([[1, 0, 0],
-                                   [0, 1, 0],
-                                   [0, 0, 1]], dtype=points_3d.dtype, device=points_3d.device)
+                                 [0, 1, 0],
+                                 [0, 0, 1]], dtype=points_3d.dtype, device=points_3d.device)
     
-    points_3d_homo = torch.cat([points_3d, torch.ones_like(points_3d[..., :1])], dim=-1)  # Homogeneous coordinates
-    projected_points = torch.bmm(points_3d_homo, intrinsics.t())
-    projected_points = projected_points[..., :2] / projected_points[..., 2:3]  # Normalize by z
+    points_3d_homo = torch.cat([points_3d, torch.ones_like(points_3d[..., :1])], dim=-1)
+    projected_points = torch.matmul(points_3d_homo, intrinsics.t())
+    projected_points = projected_points[..., :2] / (projected_points[..., 2:3] + 1e-10)
     return projected_points
 
 def compute_depth_map(projected_points, points_3d):
     """
     Compute depth map from projected points.
     Args:
-        projected_points: Tensor of shape (B, N, 2), 2D projections of points.
-        points_3d: Tensor of shape (B, N, 3), original 3D points.
+        projected_points: Tensor of shape (B, N, 2)
+        points_3d: Tensor of shape (B, N, 3) or (B, 3, N)
     Returns:
-        Depth map of shape (B, N).
+        Depth map of shape (B, N)
     """
-    return points_3d[..., 2]  # The z-coordinate represents depth.
+    if points_3d.shape[1] == 3:
+        points_3d = points_3d.transpose(1, 2)  # Convert to (B, N, 3)
+    return points_3d[..., 2]
+
+def quaternion_magnitude(quaternion):
+    """
+    Compute quaternion rotation magnitude.
+    Args:
+        quaternion: Tensor of shape (B, 4, N) or (B, 4)
+    Returns:
+        Magnitude of the quaternion rotations of shape (B, N) or (B)
+    """
+    if quaternion.dim() == 3:
+        w = quaternion[:, 3, :]  # (B, N)
+    else:
+        w = quaternion[:, 3]  # (B)
+    
+    angle = 2 * torch.acos(torch.clamp(w, -1.0, 1.0))
+    return angle
+
+def normalize_quaternion(quaternion):
+    """
+    Normalize quaternion to unit length.
+    Args:
+        quaternion: Tensor of shape (B, 4, N) or (B, 4)
+    Returns:
+        Normalized quaternion of same shape
+    """
+    if quaternion.dim() == 3:
+        return quaternion / (torch.norm(quaternion, dim=1, keepdim=True) + 1e-10)
+    else:
+        return quaternion / (torch.norm(quaternion, dim=1, keepdim=True) + 1e-10)
+
+def clip_rotation(quaternion, max_angle):
+    """
+    Clip rotation represented by quaternion to maximum angle.
+    Args:
+        quaternion: Tensor of shape (B, 4, N) or (B, 4)
+        max_angle: Maximum allowable rotation angle in radians
+    Returns:
+        Quaternion clipped to the maximum angle
+    """
+    angle = quaternion_magnitude(quaternion)
+    scale = torch.ones_like(angle)
+    mask = angle > max_angle
+    scale[mask] = max_angle / angle[mask]
+    
+    if quaternion.dim() == 3:
+        scale = scale.unsqueeze(1)  # Add channel dimension for broadcasting
+    else:
+        scale = scale.unsqueeze(1)
+        
+    quaternion = quaternion * scale
+    return normalize_quaternion(quaternion)
 
 def find_knn(points, k):
     """
     Find k nearest neighbors for each point.
     Args:
-        points: Tensor of shape (B, N, 3).
-        k: Number of nearest neighbors to find.
+        points: Tensor of shape (B, N, 3) or (B, 3, N)
+        k: Number of nearest neighbors to find
     Returns:
-        Indices of k nearest neighbors, of shape (B, N, k).
+        Indices of k nearest neighbors, of shape (B, N, k)
     """
-    dists = torch.cdist(points, points)  # Compute pairwise distances
-    knn_idx = dists.topk(k, largest=False).indices  # Indices of the k nearest neighbors
+    if points.shape[1] == 3:
+        points = points.transpose(1, 2)  # Convert to (B, N, 3)
+        
+    batch_size, num_points, _ = points.shape
+    device = points.device
+    
+    # Compute pairwise distances for each batch
+    points_expanded = points.unsqueeze(2)  # (B, N, 1, 3)
+    points_expanded_t = points.unsqueeze(1)  # (B, 1, N, 3)
+    dists = torch.sum((points_expanded - points_expanded_t) ** 2, dim=-1)  # (B, N, N)
+    
+    # Get k+1 nearest neighbors (include self)
+    k_plus_1 = min(k + 1, num_points)
+    _, indices = torch.topk(dists, k=k_plus_1, dim=-1, largest=False)  # (B, N, k+1)
+    
+    # Remove self-reference (first column) and keep only k neighbors
+    knn_idx = indices[:, :, 1:k+1]  # (B, N, k)
+    
     return knn_idx
 
 def compute_local_features(points, knn_idx):
     """
     Compute local neighborhood features.
     Args:
-        points: Tensor of shape (B, N, 3).
-        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+        points: Tensor of shape (B, N, 3) or (B, 3, N)
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k)
     Returns:
-        Local features tensor of shape (B, N, k, 3).
+        Local features tensor of shape (B, N, k, 3)
     """
+    if points.shape[1] == 3:
+        points = points.transpose(1, 2)  # Convert to (B, N, 3)
+        
     batch_size, num_points, _ = points.shape
     k = knn_idx.shape[-1]
-    neighbors = points.unsqueeze(2).expand(batch_size, num_points, k, -1)
-    local_features = neighbors.gather(1, knn_idx.unsqueeze(-1).expand(-1, -1, -1, 3))
+    
+    # Create batch indices
+    batch_indices = torch.arange(batch_size, device=points.device).view(-1, 1, 1)
+    batch_indices = batch_indices.expand(-1, num_points, k)
+    
+    # Gather neighbors using advanced indexing
+    neighbors = points[batch_indices, knn_idx]  # (B, N, k, 3)
+    
+    # Compute relative positions
+    center_points = points.unsqueeze(2).expand(-1, -1, k, -1)  # (B, N, k, 3)
+    local_features = neighbors - center_points
+    
     return local_features
 
 def estimate_normals(points, knn_idx):
     """
-    Estimate surface normals for points.
+    Estimate surface normals for points using PCA.
     Args:
-        points: Tensor of shape (B, N, 3).
-        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+        points: Tensor of shape (B, N, 3) or (B, 3, N)
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k)
     Returns:
-        Normals tensor of shape (B, N, 3).
+        Normals tensor of shape (B, N, 3)
     """
-    local_points = compute_local_features(points, knn_idx)
-    pca_centroids = local_points.mean(dim=2, keepdim=True)
-    centered = local_points - pca_centroids
-    covariance_matrix = torch.einsum('bnik,bnij->bnkj', centered, centered)
-    _, _, vh = torch.linalg.svd(covariance_matrix)
-    normals = vh[..., -1]  # Smallest singular value's vector
+    if points.shape[1] == 3:
+        points = points.transpose(1, 2)  # Convert to (B, N, 3)
+        
+    local_points = compute_local_features(points, knn_idx)  # (B, N, k, 3)
+    batch_size, num_points, k, _ = local_points.shape
+    
+    # Center the neighborhood points
+    mean = torch.mean(local_points, dim=2, keepdim=True)  # (B, N, 1, 3)
+    centered = local_points - mean  # (B, N, k, 3)
+    
+    # Compute covariance matrices for each point
+    # Reshape for batch matrix multiplication
+    centered_t = centered.transpose(2, 3)  # (B, N, 3, k)
+    covariance = torch.matmul(centered_t, centered)  # (B, N, 3, 3)
+    
+    # Compute SVD for each covariance matrix
+    try:
+        u, s, v = torch.svd(covariance)
+    except:
+        # If SVD fails, add small epsilon to diagonal
+        eps = 1e-7
+        eye = torch.eye(3, device=covariance.device).view(1, 1, 3, 3)
+        covariance = covariance + eps * eye
+        u, s, v = torch.svd(covariance)
+    
+    # Normal is the last column of v (corresponding to smallest singular value)
+    normals = v[:, :, :, -1]  # (B, N, 3)
+    
+    # Ensure consistent orientation (optional)
+    center_to_camera = -points  # Assuming camera is at origin
+    dot_product = torch.sum(normals * center_to_camera, dim=-1, keepdim=True)
+    normals = torch.where(dot_product < 0, -normals, normals)
+    
+    # Normalize
+    normals = F.normalize(normals, dim=-1)
+    
     return normals
 
 def estimate_curvature(points, knn_idx):
     """
-    Estimate local curvature of points.
+    Estimate local curvature of points using PCA ratio.
     Args:
-        points: Tensor of shape (B, N, 3).
-        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+        points: Tensor of shape (B, N, 3) or (B, 3, N)
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k)
     Returns:
-        Curvature tensor of shape (B, N, 1).
+        Curvature tensor of shape (B, N, 1)
     """
-    local_points = compute_local_features(points, knn_idx)
-    distances = torch.norm(local_points - points.unsqueeze(2), dim=-1)
-    curvature = distances.mean(dim=2, keepdim=True)  # Approximate curvature by mean distance
-    return curvature
-
-def normalize_quaternion(quaternion):
-    """
-    Normalize quaternion to unit length.
-    Args:
-        quaternion: Tensor of shape (B, 4).
-    Returns:
-        Normalized quaternion of shape (B, 4).
-    """
-    return quaternion / torch.norm(quaternion, dim=-1, keepdim=True)
-
-def quaternion_magnitude(quaternion):
-    """
-    Compute quaternion rotation magnitude.
-    Args:
-        quaternion: Tensor of shape (B, 4).
-    Returns:
-        Magnitude of the quaternion rotations.
-    """
-    w = quaternion[..., 3]
-    angle = 2 * torch.acos(torch.clamp(w, -1.0, 1.0))  # Compute rotation angle
-    return angle
-
-def clip_rotation(quaternion, max_angle):
-    """
-    Clip rotation represented by quaternion to maximum angle.
-    Args:
-        quaternion: Tensor of shape (B, 4).
-        max_angle: Maximum allowable rotation angle in radians.
-    Returns:
-        Quaternion clipped to the maximum angle.
-    """
-    angle = quaternion_magnitude(quaternion)
-    scale = torch.ones_like(angle)
-    mask = angle > max_angle
-    scale[mask] = max_angle / angle[mask]
-    quaternion = quaternion * scale.unsqueeze(-1)
-    return normalize_quaternion(quaternion)
+    if points.shape[1] == 3:
+        points = points.transpose(1, 2)  # Convert to (B, N, 3)
+        
+    local_points = compute_local_features(points, knn_idx)  # (B, N, k, 3)
+    batch_size, num_points, k, _ = local_points.shape
+    
+    # Center the neighborhood points
+    mean = torch.mean(local_points, dim=2, keepdim=True)  # (B, N, 1, 3)
+    centered = local_points - mean  # (B, N, k, 3)
+    
+    # Compute covariance matrices
+    centered_t = centered.transpose(2, 3)  # (B, N, 3, k)
+    covariance = torch.matmul(centered_t, centered)  # (B, N, 3, 3)
+    
+    # Compute eigenvalues
+    try:
+        eigenvalues = torch.linalg.eigvalsh(covariance)  # (B, N, 3)
+    except:
+        # If eigendecomposition fails, add small epsilon to diagonal
+        eps = 1e-7
+        eye = torch.eye(3, device=covariance.device).view(1, 1, 3, 3)
+        covariance = covariance + eps * eye
+        eigenvalues = torch.linalg.eigvalsh(covariance)
+    
+    # Sort eigenvalues in ascending order
+    eigenvalues, _ = torch.sort(eigenvalues, dim=-1)  # (B, N, 3)
+    
+    # Compute curvature as ratio of smallest to sum of eigenvalues
+    curvature = eigenvalues[:, :, 0] / (torch.sum(eigenvalues, dim=-1) + 1e-10)
+    
+    return curvature.unsqueeze(-1)  # (B, N, 1)
