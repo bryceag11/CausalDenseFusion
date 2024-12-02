@@ -591,22 +591,31 @@ def project_to_2d(points_3d, intrinsics=None):
     """
     Project 3D points to 2D using camera intrinsics.
     Args:
-        points_3d: Tensor of shape (B, N, 3) or (B, 3, N)
+        points_3d: Tensor of shape (B, N, 3)
         intrinsics: Camera intrinsic matrix of shape (3, 3)
     Returns:
         Tensor of shape (B, N, 2), representing 2D projections
     """
-    if points_3d.shape[1] == 3:
-        points_3d = points_3d.transpose(1, 2)  # Convert to (B, N, 3)
-        
+    batch_size, num_points, _ = points_3d.shape
+    
     if intrinsics is None:
         intrinsics = torch.tensor([[1, 0, 0],
                                  [0, 1, 0],
                                  [0, 0, 1]], dtype=points_3d.dtype, device=points_3d.device)
     
-    points_3d_homo = torch.cat([points_3d, torch.ones_like(points_3d[..., :1])], dim=-1)
-    projected_points = torch.matmul(points_3d_homo, intrinsics.t())
-    projected_points = projected_points[..., :2] / (projected_points[..., 2:3] + 1e-10)
+    # Add homogeneous coordinate
+    points_3d_homo = torch.cat([points_3d, torch.ones(batch_size, num_points, 1, device=points_3d.device)], dim=-1)  # (B, N, 4)
+    
+    # Reshape for batch matrix multiplication
+    points_3d_homo = points_3d_homo.view(batch_size * num_points, -1)  # (B*N, 4)
+    
+    # Project points
+    projected_points = torch.matmul(points_3d_homo, intrinsics.t())  # (B*N, 3)
+    projected_points = projected_points.view(batch_size, num_points, -1)  # (B, N, 3)
+    
+    # Normalize homogeneous coordinates
+    projected_points = projected_points[..., :2] / (projected_points[..., 2:3] + 1e-10)  # (B, N, 2)
+    
     return projected_points
 
 def compute_depth_map(projected_points, points_3d):
@@ -614,12 +623,10 @@ def compute_depth_map(projected_points, points_3d):
     Compute depth map from projected points.
     Args:
         projected_points: Tensor of shape (B, N, 2)
-        points_3d: Tensor of shape (B, N, 3) or (B, 3, N)
+        points_3d: Tensor of shape (B, N, 3)
     Returns:
         Depth map of shape (B, N)
     """
-    if points_3d.shape[1] == 3:
-        points_3d = points_3d.transpose(1, 2)  # Convert to (B, N, 3)
     return points_3d[..., 2]
 
 def quaternion_magnitude(quaternion):
