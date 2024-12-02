@@ -78,16 +78,9 @@ def main():
     estimator = PoseNet(num_points = opt.num_points, num_obj = opt.num_objects)
     estimator.cuda()
     # Initialize CausalRefineNet instead of PoseRefineNet
-    refiner = CausalRefineNet(
-        num_points=opt.num_points,
-        num_obj=opt.num_objects,
-        max_rotation_angle=np.pi / 6, 
-        translation_min=-0.5,  
-        translation_max=0.5,   
-        num_iterations=2       
-    )
+    refiner = CausalRefineNet(num_points=opt.num_points, num_obj=opt.num_objects)
     refiner.cuda()
-
+    
     if opt.resume_posenet != '':
         estimator.load_state_dict(torch.load('{0}/{1}'.format(opt.outf, opt.resume_posenet)))
 
@@ -152,33 +145,24 @@ def main():
         for rep in range(opt.repeat_epoch):
             for i, data in enumerate(dataloader, 0):
                 points, choose, img, target, model_points, idx = data
-                points, choose, img, target, model_points, idx = Variable(points).cuda(), \
-                                                                 Variable(choose).cuda(), \
-                                                                 Variable(img).cuda(), \
-                                                                 Variable(target).cuda(), \
-                                                                 Variable(model_points).cuda(), \
-                                                                 Variable(idx).cuda()
-                pred_r, pred_t, pred_c, emb = estimator(img, points, choose, idx) # Now shape (B,Pose,Poins)               
+                points, choose, img, target, model_points, idx = \
+                    Variable(points).cuda(), \
+                    Variable(choose).cuda(), \
+                    Variable(img).cuda(), \
+                    Variable(target).cuda(), \
+                    Variable(model_points).cuda(), \
+                    Variable(idx).cuda()
+                
+                pred_r, pred_t, pred_c, emb = estimator(img, points, choose, idx)
                 loss, dis, new_points, new_target = criterion(pred_r, pred_t, pred_c, target, model_points, idx, points, opt.w, opt.refine_start)
                 
                 if opt.refine_start:
-                    pred_r = pred_r.permute(0, 2, 1)  # Shape: (B, 4, num_points)
-                    pred_t = pred_t.permute(0, 2, 1)  # Shape: (B, 3, num_points)
-                    pred_pose = torch.cat([pred_r, pred_t], dim=1)  # Shape: (B, 7, num_points)
-                    prev_confidence = pred_c.permute(0, 2, 1)  # Shape: (B, 1, num_points)
-        
                     for ite in range(0, opt.iteration):
-                        refined_pose, refined_conf = refiner(
-                            point_cloud=points, 
-                            prev_pose=pred_pose,  # Shape: (B, 7, num_points)
-                            prev_confidence=prev_confidence,  # Shape: (B, 1, num_points)
-                        )
-                         # Split refined_pose back into rotation and translation
-                        refined_r = refined_pose[:, :4, :]  # (B,  4, num_points)
-                        print(refined_r.shape)
-                        refined_t = refined_pose[:, 4:, :]  # (B, 3, num_points)
-                        print(refined_t.shape)
-                        dis, new_points, new_target = criterion_refine(refined_r, refined_t, new_target, model_points, idx, new_points)
+                        # Forward pass through refiner
+                        pred_r, pred_t = refiner(new_points, emb, idx)
+                        
+                        # Compute refinement loss
+                        dis, new_points, new_target = criterion_refine(pred_r, pred_t, new_target, model_points, idx, new_points)
                         dis.backward()
                 else:
                     loss.backward()
@@ -210,12 +194,14 @@ def main():
 
         for j, data in enumerate(testdataloader, 0):
             points, choose, img, target, model_points, idx = data
-            points, choose, img, target, model_points, idx = Variable(points).cuda(), \
-                                                             Variable(choose).cuda(), \
-                                                             Variable(img).cuda(), \
-                                                             Variable(target).cuda(), \
-                                                             Variable(model_points).cuda(), \
-                                                             Variable(idx).cuda()
+            points, choose, img, target, model_points, idx = \
+                Variable(points).cuda(), \
+                Variable(choose).cuda(), \
+                Variable(img).cuda(), \
+                Variable(target).cuda(), \
+                Variable(model_points).cuda(), \
+                Variable(idx).cuda()
+                
             pred_r, pred_t, pred_c, emb = estimator(img, points, choose, idx)
             _, dis, new_points, new_target = criterion(pred_r, pred_t, pred_c, target, model_points, idx, points, opt.w, opt.refine_start)
 
