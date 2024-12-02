@@ -139,33 +139,35 @@ class PoseRefineNetFeat(nn.Module):
         self.conv1 = torch.nn.Conv1d(3, 64, 1)
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
 
-        self.e_conv1 = torch.nn.Conv1d(32, 64, 1)
-        self.e_conv2 = torch.nn.Conv1d(64, 128, 1)
+        self.e_conv1 = torch.nn.Conv1d(32, 64, 1) # (B, 64, N)
+        self.e_conv2 = torch.nn.Conv1d(64, 128, 1) # (B, 128, N)
 
         self.conv5 = torch.nn.Conv1d(384, 512, 1)
-        self.conv6 = torch.nn.Conv1d(512, 1024, 1)
+        self.conv6 = torch.nn.Conv1d(512, 1024, 1) # (B, 1024, N)
 
-        self.ap1 = torch.nn.AvgPool1d(num_points)
+        self.ap1 = torch.nn.AvgPool1d(num_points) # Pooling input (B, 1024, 1)
         self.num_points = num_points
 
     def forward(self, x, emb):
-        x = F.relu(self.conv1(x))
-        emb = F.relu(self.e_conv1(emb))
-        pointfeat_1 = torch.cat([x, emb], dim=1)
+        # x: (B, 3, N)
+        # emb: (B, 32, N)
+        x = F.relu(self.conv1(x)) # (B, 64, N)
+        emb = F.relu(self.e_conv1(emb)) # Embedding (B, 64, N)
+        pointfeat_1 = torch.cat([x, emb], dim=1) # (B, 128, N)
 
-        x = F.relu(self.conv2(x))
-        emb = F.relu(self.e_conv2(emb))
-        pointfeat_2 = torch.cat([x, emb], dim=1)
+        x = F.relu(self.conv2(x)) # (B, 128, N)
+        emb = F.relu(self.e_conv2(emb)) # (B, 128, N)
+        pointfeat_2 = torch.cat([x, emb], dim=1) # (B, 256, N)
 
-        pointfeat_3 = torch.cat([pointfeat_1, pointfeat_2], dim=1)
+        pointfeat_3 = torch.cat([pointfeat_1, pointfeat_2], dim=1) # (B, 384, N)
 
-        x = F.relu(self.conv5(pointfeat_3))
-        x = F.relu(self.conv6(x))
+        x = F.relu(self.conv5(pointfeat_3)) # (B, 512, N)
+        x = F.relu(self.conv6(x)) # (B, 1024, N)
 
-        ap_x = self.ap1(x)
+        ap_x = self.ap1(x) # Pooling output (B, 1024, 1)
 
-        ap_x = ap_x.view(-1, 1024)
-        return ap_x
+        ap_x = ap_x.view(-1, 1024) # Reshaping (B, 1024) 
+        return ap_x # Information across all points so object-level
 
 class PoseRefineNet(nn.Module):
     def __init__(self, num_points, num_obj):
@@ -185,33 +187,34 @@ class PoseRefineNet(nn.Module):
         self.num_obj = num_obj
 
     def forward(self, x, emb, obj):
+        # x: (B, 3, N)
+        # emb: (B, 32, N)
+        # obj: (B, num_obj)
         bs = x.size()[0]
         
-        x = x.transpose(2, 1).contiguous()
-        ap_x = self.feat(x, emb)
+        x = x.transpose(2, 1).contiguous() # (B, N, 3)
+        ap_x = self.feat(x, emb) #(B, 1024)
+ 
+        rx = F.relu(self.conv1_r(ap_x)) # (B, 512)
+        tx = F.relu(self.conv1_t(ap_x)) # (B, 512)
 
-        rx = F.relu(self.conv1_r(ap_x))
-        tx = F.relu(self.conv1_t(ap_x))   
+        rx = F.relu(self.conv2_r(rx)) # (B, 128)
+        tx = F.relu(self.conv2_t(tx)) # (B, 128)
 
-        rx = F.relu(self.conv2_r(rx))
-        tx = F.relu(self.conv2_t(tx))
-
-        rx = self.conv3_r(rx).view(bs, self.num_obj, 4)
-        tx = self.conv3_t(tx).view(bs, self.num_obj, 3)
+        rx = self.conv3_r(rx).view(bs, self.num_obj, 4) # (B, num_obj, 4)
+        tx = self.conv3_t(tx).view(bs, self.num_obj, 3) # (B, num_obj, 3)
 
         b = 0
-        out_rx = torch.index_select(rx[b], 0, obj[b])
-        out_tx = torch.index_select(tx[b], 0, obj[b])
+        out_rx = torch.index_select(rx[b], 0, obj[b]) # (4, num_obj)
+        out_tx = torch.index_select(tx[b], 0, obj[b]) # (3, num_obj)
 
-        return out_rx, out_tx
-
+        return out_rx, out_tx # (num_obj, 4) (num_obj, 3)
 
 
 class CausalRefineNet(nn.Module):
     def __init__(self, num_points, num_obj, max_rotation_angle=np.pi/6, translation_min=-0.5, translation_max=0.5, num_iterations=2):
         super(CausalRefineNet, self).__init__()
         self.num_points = num_points
-        #self.num_obj = num_obj
         self.num_iterations = num_iterations 
         
         # SCM components
@@ -231,34 +234,34 @@ class CausalRefineNet(nn.Module):
         """
          Args:
             point_cloud: (B, N, 3) transformed point cloud
-            prev_pose: (B, 7) pose [quat + trans]
-            prev_confidence: (B, 1) previous confidence score
+            prev_pose: (B, 7, N) pose [quat + trans] for each point
+            prev_confidence: (B, 1, N) previous confidence score
         Returns:
-            current_pose: (B, 7) refined pose
-            current_conf: (B, 1) updated confidence score
+            current_pose: (B, 7, N) refined pose
+            current_conf: (B, 1, N) updated confidence score
         """
-        batch_size = point_cloud.size(0)
+        B, N, _ = point_cloud.shape
         
         # Current iteration's estimate
-        current_pose = prev_pose
-        current_conf = prev_confidence
+        current_pose = prev_pose  # (B, 7, N)
+        current_conf = prev_confidence  # (B, 1, N)
 
         for iteration in range(self.num_iterations):
             # 1. Estimate visibility of points
-            vis_mask = self.visibility_estimator(point_cloud, current_pose)
+            vis_mask = self.visibility_estimator(point_cloud, current_pose)  # (B, N)
             
             # 2. Extract geometric features from visible points
-            geom_features = self.geometric_analyzer(point_cloud, vis_mask)
+            geom_features = self.geometric_analyzer(point_cloud, vis_mask)  # (B, 256, N)
             
             # 3. Estimate pose residual using SCM
-            pose_residual = self.pose_residual(geom_features, current_pose)
+            pose_residual = self.pose_residual(geom_features, current_pose)  # (B, 7, N)
             
             # 4. Apply physical constraints and update pose
-            current_pose = self.apply_constraints(current_pose + pose_residual)
+            current_pose = self.apply_constraints(current_pose + pose_residual)  # (B, 7, N)
             
             # 5. Update confidence based on visibility and residual
-            current_conf = self.confidence_updater(vis_mask, pose_residual, current_conf)
-
+            current_conf = self.confidence_updater(vis_mask, pose_residual, current_conf)  # (B, 1, N)
+        
         return current_pose, current_conf
 
     def apply_constraints(self, pose):
@@ -345,24 +348,37 @@ class VisibilityModule(nn.Module):
         Estimate point visibility given current pose
         Args:
             point_cloud: (B, N, 3) transformed point cloud
-            pose: (B, 7) pose [quat + trans]
+            pose: (B, 7, N) pose [quat + trans] for each point
         Returns:
             vis_mask: (B, N) boolean visibility mask
         """
         batch_size, num_points, _ = point_cloud.shape
+        print(f'point clout shape {point_cloud.shape}')
         
-        # Convert pose to transformation matrix
-        R = quaternion_to_matrix(pose[:, :4])
-        t = pose[:, 4:]
+        # Split pose into rotation and translation
+        quat = pose[:, :4, :]  # (B, 4, N)
+        trans = pose[:, 4:, :]  # (B, 3, N)
         
-        # Transform points to camera frame
-        transformed_points = torch.bmm(point_cloud, R.transpose(1, 2)) + t.unsqueeze(1)
+        # Convert quaternions to rotation matrices
+        R = quaternion_to_matrix(quat)  # (B, 3, 3, N)
+    
+        # Matmul with R: (B, 3, 3, N) @ (B, 3, 1, N) -> (B, 3, 1, N)
+        # transformed_points = torch.matmul(R, points_expanded).squeeze(-2)  # (B, 3, N)
+        points_expanded = point_cloud.transpose(1, 2).unsqueeze(2)  # (B, 3, 1, N)
+        R = R.permute(0, 3, 1, 2)  # (B, N, 3, 3)
+        points_expanded = points_expanded.permute(0, 3, 1, 2)  # (B, N, 3, 1)
+        transformed_points = torch.matmul(R, points_expanded).squeeze(-1)  # (B, N, 3)
+        transformed_points = transformed_points.permute(0, 2, 1)  # (B, 3, N)
+        transformed_points = transformed_points + trans  # (B, 3, N)
+
+        # Convert to (B, N, 3) for projection
+        transformed_points = transformed_points.transpose(1, 2)  # (B, N, 3)
         
         # Project points to 2D
-        projected_points = project_to_2d(transformed_points)  # Implement camera projection
+        projected_points = project_to_2d(transformed_points)  # (B, N, 2)
         
         # Compute depth map from projected points
-        depth_map = compute_depth_map(projected_points, transformed_points)
+        depth_map = compute_depth_map(projected_points, transformed_points)  # (B, N)
         
         # Check depth consistency
         point_depths = transformed_points[..., 2]
@@ -378,7 +394,7 @@ class GeometricModule(nn.Module):
         
         # Local geometric feature extraction
         self.feat_extraction = nn.Sequential(
-            nn.Conv1d(9, 64, 1),
+            nn.Conv1d(10, 64, 1),
             nn.ReLU(),
             nn.Conv1d(64, 128, 1),
             nn.ReLU(),
@@ -392,33 +408,56 @@ class GeometricModule(nn.Module):
             point_cloud: (B, N, 3) point cloud
             vis_mask: (B, N) visibility mask
         Returns:
-            geom_features: Geometric features
+            geom_features_full: Geometric features (B, 256, N)
         """
-        batch_size, num_points, _ = point_cloud.shape
+        B, N, _ = point_cloud.shape
         
         # Only process visible points
-        visible_points = point_cloud[vis_mask].reshape(batch_size, -1, 3)
+        visible_mask = vis_mask.bool()  # (B, N)
         
-        # Compute local neighborhood features
-        knn_idx = find_knn(visible_points, k=self.k)
-        local_features = compute_local_features(visible_points, knn_idx)
+        # Initialize geom_features_full with zeros
+        geom_features_full = torch.zeros(B, 256, N, device=point_cloud.device)
         
-        # Extract geometric properties
-        normals = estimate_normals(visible_points, knn_idx)
-        curvature = estimate_curvature(visible_points, knn_idx)
+        for b in range(B):
+            # Indices of visible points in batch b
+            visible_indices = visible_mask[b].nonzero(as_tuple=False).squeeze(1)  # (M,)
+            M = visible_indices.numel()
+            
+            if M == 0:
+                continue  # No visible points in this batch
+            
+            # Gather visible points
+            visible_points = point_cloud[b, visible_indices, :]  # (M, 3)
+            
+            # Compute local neighborhood features
+            knn_idx = find_knn(visible_points.unsqueeze(0), k=self.k)  # (1, M, K)
+            local_features = compute_local_features(visible_points.unsqueeze(0), knn_idx)  # (1, M, K,3)
+            
+            # Extract geometric properties
+            normals = estimate_normals(visible_points.unsqueeze(0), knn_idx)  # (1, M,3)
+            curvature = estimate_curvature(visible_points.unsqueeze(0), knn_idx)  # (1, M,1)
+            
+            # Aggregate local_features across the K dimension (e.g., mean pooling)
+            local_features = torch.mean(local_features, dim=2)  # (1, M,3)
+            
+            # Combine features
+            combined_features = torch.cat([
+                visible_points.unsqueeze(0),  # (1, M,3)
+                normals,                      # (1, M,3)
+                curvature,                    # (1, M,1)
+                local_features                # (1, M,3)
+            ], dim=-1)  # (1, M,10)
+            
+            # Extract final geometric features
+            # Transpose to (B, C, M) for Conv1d
+            combined_features = combined_features.transpose(1, 2)  # (1,10,M)
+            geom_features = self.feat_extraction(combined_features)  # (1,256,M)
+            
+            # Assign geom_features to the corresponding points
+            geom_features_full[b, :, visible_indices] = geom_features.squeeze(0)  # (256,M)
         
-        # Combine features
-        combined_features = torch.cat([
-            visible_points,
-            normals,
-            curvature,
-            local_features
-        ], dim=-1)
-        
-        # Extract final geometric features
-        geom_features = self.feat_extraction(combined_features.transpose(1, 2))
-        
-        return geom_features
+        return geom_features_full  # (B,256,N)
+
 
 class ResidualModule(nn.Module):
     def __init__(self):
@@ -436,7 +475,7 @@ class ResidualModule(nn.Module):
         self.rot_net = nn.Sequential(
             nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Linear(32, 4)  # quaternion
+            nn.Linear(32, 4)  # Quaternion
         )
         
         # Translation residual
@@ -448,29 +487,36 @@ class ResidualModule(nn.Module):
 
     def forward(self, geom_features, current_pose):
         """
-        Estimate pose residual from geometric features
         Args:
-            geom_features: Extracted geometric features
-            current_pose: (B, 7) current pose estimate [quat + trans]
+            geom_features: (B, 256, N) - per-point geometric features
+            current_pose: (B, 7, N) - current pose estimates per point
         Returns:
-            pose_residual: (B, 7) pose residual
+            pose_residual: (B, 7, N) - pose residuals per point
         """
+        B, C, N = geom_features.shape
+        
+        # Permute and reshape to (B*N, C) for processing
+        geom_features = geom_features.permute(0, 2, 1).contiguous().view(B*N, C)  # (B*N, 256)
+        
         # Process geometric features
-        features = self.feature_net(geom_features)
+        features = self.feature_net(geom_features)  # (B*N, 64)
         
         # Estimate rotation and translation residuals
-        rot_residual = self.rot_net(features)
-        rot_residual = normalize_quaternion(rot_residual)
-        trans_residual = self.trans_net(features)
+        rot_residual = self.rot_net(features)        # (B*N, 4)
+        rot_residual = normalize_quaternion(rot_residual)  # (B*N, 4)
+        trans_residual = self.trans_net(features)    # (B*N, 3)
         
         # Combine residuals
-        pose_residual = torch.cat([rot_residual, trans_residual], dim=1)
+        pose_residual = torch.cat([rot_residual, trans_residual], dim=1)  # (B*N, 7)
         
         # Apply physical constraints
-        pose_residual = self.constrain_residual(pose_residual, current_pose)
+        pose_residual = self.constrain_residual(pose_residual, current_pose.permute(0, 2, 1).contiguous().view(B*N, 7))  # (B*N, 7)
+        
+        # Reshape back to (B, 7, N)
+        pose_residual = pose_residual.view(B, N, 7).permute(0, 2, 1).contiguous()  # (B, 7, N)
         
         return pose_residual
-    
+
     def constrain_residual(self, residual, current_pose):
         """Apply physical constraints to residual"""
         # Limit rotation magnitude
@@ -502,42 +548,67 @@ class ConfidenceModule(nn.Module):
         Update confidence based on visibility and residual
         Args:
             vis_mask: (B, N) visibility mask
-            pose_residual: (B, 7) pose residual
-            prev_conf: (B, 1) previous confidence
+            pose_residual: (B, 7, N) pose residuals per point
+            prev_conf: (B, 1, N) previous confidence scores per point
         Returns:
-            new_confidence: (B, 1) updated confidence
+            new_confidence: (B, 1, N) updated confidence scores per point
         """
-        # Compute visibility ratio
-        vis_ratio = vis_mask.float().mean(dim=1, keepdim=True)
+        B, N = vis_mask.shape
+
+        # Compute visibility ratio per point
+        vis_ratio = vis_mask.float().unsqueeze(1)  # (B, 1, N)
         
-        # Compute residual magnitude
-        rot_magnitude = quaternion_magnitude(pose_residual[:, :4])
-        trans_magnitude = torch.norm(pose_residual[:, 4:], dim=1, keepdim=True)
+        # Compute residual magnitude per point
+        rot_magnitude = quaternion_magnitude(pose_residual[:, :4, :])  # (B, N)
+        rot_magnitude = rot_magnitude.unsqueeze(1)  # (B, 1, N)
+        
+        trans_magnitude = torch.norm(pose_residual[:, 4:, :], dim=1, keepdim=True)  # (B, 1, N)
         
         # Combine factors for confidence update
         confidence_factors = torch.cat([
-            vis_ratio,
-            rot_magnitude,
-            trans_magnitude,
-            prev_conf
-        ], dim=1)
+            vis_ratio,         # (B, 1, N)
+            rot_magnitude,    # (B, 1, N)
+            trans_magnitude,  # (B, 1, N)
+            prev_conf         # (B, 1, N)
+        ], dim=1)  # (B, 4, N)
+        
+        # Reshape for linear layers: (B*N, 4)
+        confidence_factors = confidence_factors.permute(0, 2, 1).contiguous().view(B*N, 4)  # (B*N,4)
         
         # Estimate new confidence
-        new_confidence = self.confidence_net(confidence_factors)
+        new_confidence = self.confidence_net(confidence_factors)  # (B*N,1)
+        
+        # Reshape back to (B,1,N)
+        new_confidence = new_confidence.view(B, N, 1).permute(0, 2, 1)  # (B,1,N)
         
         return new_confidence
 
-import torch
 
 def quaternion_to_matrix(quaternion):
     """
     Convert quaternion to a 3x3 rotation matrix.
     Args:
-        quaternion: Tensor of shape (B, 4), where each quaternion is [x, y, z, w].
+        quaternion: Tensor of shape (B, 4, N) or (B, 4), where each quaternion is [x, y, z, w]
     Returns:
-        Tensor of shape (B, 3, 3), representing the corresponding rotation matrices.
+        Tensor of shape (B, 3, 3, N) or (B, 3, 3), representing the corresponding rotation matrices.
     """
-    x, y, z, w = quaternion.unbind(dim=-1)
+    if quaternion.dim() == 3:
+        # Handle (B, 4, N) shape
+        B, _, N = quaternion.shape
+        quaternion = quaternion.permute(0, 2, 1)  # (B, N, 4)
+        x = quaternion[..., 0]
+        y = quaternion[..., 1]
+        z = quaternion[..., 2]
+        w = quaternion[..., 3]
+    else:
+        # Handle (B, 4) shape
+        B = quaternion.shape[0]
+        N = 1
+        x = quaternion[:, 0]
+        y = quaternion[:, 1]
+        z = quaternion[:, 2]
+        w = quaternion[:, 3]
+
     xx = x * x
     yy = y * y
     zz = z * z
@@ -553,7 +624,12 @@ def quaternion_to_matrix(quaternion):
         1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy),
         2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx),
         2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)
-    ], dim=-1).view(-1, 3, 3)
+    ], dim=-1).view(B, -1, 3, 3)
+
+    if N > 1:
+        # For point-wise case, reshape to (B, N, 3, 3)
+        matrix = matrix.view(B, N, 3, 3)
+        matrix = matrix.permute(0, 2, 3, 1)  # (B, 3, 3, N)
 
     return matrix
 
@@ -561,126 +637,245 @@ def project_to_2d(points_3d, intrinsics=None):
     """
     Project 3D points to 2D using camera intrinsics.
     Args:
-        points_3d: Tensor of shape (B, N, 3).
-        intrinsics: Camera intrinsic matrix of shape (3, 3).
-                    Defaults to a normalized pinhole camera model if not provided.
+        points_3d: Tensor of shape (B, N, 3)
+        intrinsics: Camera intrinsic matrix of shape (3, 3) or (4, 4)
     Returns:
-        Tensor of shape (B, N, 2), representing 2D projections.
+        Tensor of shape (B, N, 2), representing 2D projections
     """
+    print(f'points shape check: {points_3d.shape}')
+    batch_size, num_points, _ = points_3d.shape
+    
     if intrinsics is None:
         intrinsics = torch.tensor([[1, 0, 0],
                                    [0, 1, 0],
                                    [0, 0, 1]], dtype=points_3d.dtype, device=points_3d.device)
     
-    points_3d_homo = torch.cat([points_3d, torch.ones_like(points_3d[..., :1])], dim=-1)  # Homogeneous coordinates
-    projected_points = torch.bmm(points_3d_homo, intrinsics.t())
-    projected_points = projected_points[..., :2] / projected_points[..., 2:3]  # Normalize by z
+    if intrinsics.shape == (3, 3):
+        # Expand intrinsics to (4, 4)
+        intrinsics = torch.cat([
+            torch.cat([intrinsics, torch.zeros(3, 1, device=intrinsics.device)], dim=1),
+            torch.tensor([[0, 0, 0, 1]], dtype=intrinsics.dtype, device=intrinsics.device)
+        ], dim=0)
+    
+    # Add homogeneous coordinate
+    points_3d_homo = torch.cat([points_3d, torch.ones(batch_size, num_points, 1, device=points_3d.device)], dim=-1)  # (B, N, 4)
+    
+    # Reshape for batch matrix multiplication
+    points_3d_homo = points_3d_homo.view(batch_size * num_points, -1)  # (B*N, 4)
+    
+    # Project points
+    projected_points = torch.matmul(points_3d_homo, intrinsics.t())  # (B*N, 4)
+    projected_points = projected_points.view(batch_size, num_points, -1)  # (B, N, 4)
+    
+    # Normalize homogeneous coordinates
+    projected_points = projected_points[..., :2] / (projected_points[..., 2:3] + 1e-10)  # (B, N, 2)
+    
     return projected_points
+
 
 def compute_depth_map(projected_points, points_3d):
     """
     Compute depth map from projected points.
     Args:
-        projected_points: Tensor of shape (B, N, 2), 2D projections of points.
-        points_3d: Tensor of shape (B, N, 3), original 3D points.
+        projected_points: Tensor of shape (B, N, 2)
+        points_3d: Tensor of shape (B, N, 3)
     Returns:
-        Depth map of shape (B, N).
+        Depth map of shape (B, N)
     """
-    return points_3d[..., 2]  # The z-coordinate represents depth.
+    return points_3d[..., 2]
+
+def quaternion_magnitude(quaternion):
+    """
+    Compute quaternion rotation magnitude.
+    Args:
+        quaternion: Tensor of shape (B, 4, N) or (B, 4)
+    Returns:
+        Magnitude of the quaternion rotations of shape (B, N) or (B)
+    """
+    if quaternion.dim() == 3:
+        w = quaternion[:, 3, :]  # (B, N)
+    else:
+        w = quaternion[:, 3]  # (B)
+    
+    angle = 2 * torch.acos(torch.clamp(w, -1.0, 1.0))
+    return angle
+
+def normalize_quaternion(quaternion):
+    """
+    Normalize quaternion to unit length.
+    Args:
+        quaternion: Tensor of shape (B, 4, N) or (B, 4)
+    Returns:
+        Normalized quaternion of same shape
+    """
+    if quaternion.dim() == 3:
+        return quaternion / (torch.norm(quaternion, dim=1, keepdim=True) + 1e-10)
+    else:
+        return quaternion / (torch.norm(quaternion, dim=1, keepdim=True) + 1e-10)
+
+def clip_rotation(quaternion, max_angle):
+    """
+    Clip rotation represented by quaternion to maximum angle.
+    Args:
+        quaternion: Tensor of shape (B, 4, N) or (B, 4)
+        max_angle: Maximum allowable rotation angle in radians
+    Returns:
+        Quaternion clipped to the maximum angle
+    """
+    angle = quaternion_magnitude(quaternion)
+    scale = torch.ones_like(angle)
+    mask = angle > max_angle
+    scale[mask] = max_angle / angle[mask]
+    
+    if quaternion.dim() == 3:
+        scale = scale.unsqueeze(1)  # Add channel dimension for broadcasting
+    else:
+        scale = scale.unsqueeze(1)
+        
+    quaternion = quaternion * scale
+    return normalize_quaternion(quaternion)
 
 def find_knn(points, k):
     """
     Find k nearest neighbors for each point.
     Args:
-        points: Tensor of shape (B, N, 3).
-        k: Number of nearest neighbors to find.
+        points: Tensor of shape (B, N, 3) or (B, 3, N)
+        k: Number of nearest neighbors to find
     Returns:
-        Indices of k nearest neighbors, of shape (B, N, k).
+        Indices of k nearest neighbors, of shape (B, N, k)
     """
-    dists = torch.cdist(points, points)  # Compute pairwise distances
-    knn_idx = dists.topk(k, largest=False).indices  # Indices of the k nearest neighbors
+    if points.shape[1] == 3:
+        points = points.transpose(1, 2)  # Convert to (B, N, 3)
+        
+    batch_size, num_points, _ = points.shape
+    device = points.device
+    
+    # Compute pairwise distances for each batch
+    points_expanded = points.unsqueeze(2)  # (B, N, 1, 3)
+    points_expanded_t = points.unsqueeze(1)  # (B, 1, N, 3)
+    dists = torch.sum((points_expanded - points_expanded_t) ** 2, dim=-1)  # (B, N, N)
+    
+    # Get k+1 nearest neighbors (include self)
+    k_plus_1 = min(k + 1, num_points)
+    _, indices = torch.topk(dists, k=k_plus_1, dim=-1, largest=False)  # (B, N, k+1)
+    
+    # Remove self-reference (first column) and keep only k neighbors
+    knn_idx = indices[:, :, 1:k+1]  # (B, N, k)
+    
     return knn_idx
 
 def compute_local_features(points, knn_idx):
     """
     Compute local neighborhood features.
     Args:
-        points: Tensor of shape (B, N, 3).
-        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+        points: Tensor of shape (B, N, 3) or (B, 3, N)
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k)
     Returns:
-        Local features tensor of shape (B, N, k, 3).
+        Local features tensor of shape (B, N, k, 3)
     """
+    if points.shape[1] == 3:
+        points = points.transpose(1, 2)  # Convert to (B, N, 3)
+        
     batch_size, num_points, _ = points.shape
     k = knn_idx.shape[-1]
-    neighbors = points.unsqueeze(2).expand(batch_size, num_points, k, -1)
-    local_features = neighbors.gather(1, knn_idx.unsqueeze(-1).expand(-1, -1, -1, 3))
+    
+    # Create batch indices
+    batch_indices = torch.arange(batch_size, device=points.device).view(-1, 1, 1)
+    batch_indices = batch_indices.expand(-1, num_points, k)
+    
+    # Gather neighbors using advanced indexing
+    neighbors = points[batch_indices, knn_idx]  # (B, N, k, 3)
+    
+    # Compute relative positions
+    center_points = points.unsqueeze(2).expand(-1, -1, k, -1)  # (B, N, k, 3)
+    local_features = neighbors - center_points
+    
     return local_features
 
 def estimate_normals(points, knn_idx):
     """
-    Estimate surface normals for points.
+    Estimate surface normals for points using PCA.
     Args:
-        points: Tensor of shape (B, N, 3).
-        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+        points: Tensor of shape (B, N, 3) or (B, 3, N)
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k)
     Returns:
-        Normals tensor of shape (B, N, 3).
+        Normals tensor of shape (B, N, 3)
     """
-    local_points = compute_local_features(points, knn_idx)
-    pca_centroids = local_points.mean(dim=2, keepdim=True)
-    centered = local_points - pca_centroids
-    covariance_matrix = torch.einsum('bnik,bnij->bnkj', centered, centered)
-    _, _, vh = torch.linalg.svd(covariance_matrix)
-    normals = vh[..., -1]  # Smallest singular value's vector
+    if points.shape[1] == 3:
+        points = points.transpose(1, 2)  # Convert to (B, N, 3)
+        
+    local_points = compute_local_features(points, knn_idx)  # (B, N, k, 3)
+    batch_size, num_points, k, _ = local_points.shape
+    
+    # Center the neighborhood points
+    mean = torch.mean(local_points, dim=2, keepdim=True)  # (B, N, 1, 3)
+    centered = local_points - mean  # (B, N, k, 3)
+    
+    # Compute covariance matrices for each point
+    # Reshape for batch matrix multiplication
+    centered_t = centered.transpose(2, 3)  # (B, N, 3, k)
+    covariance = torch.matmul(centered_t, centered)  # (B, N, 3, 3)
+    
+    # Compute SVD for each covariance matrix
+    try:
+        u, s, v = torch.svd(covariance)
+    except:
+        # If SVD fails, add small epsilon to diagonal
+        eps = 1e-7
+        eye = torch.eye(3, device=covariance.device).view(1, 1, 3, 3)
+        covariance = covariance + eps * eye
+        u, s, v = torch.svd(covariance)
+    
+    # Normal is the last column of v (corresponding to smallest singular value)
+    normals = v[:, :, :, -1]  # (B, N, 3)
+    
+    # Ensure consistent orientation (optional)
+    center_to_camera = -points  # Assuming camera is at origin
+    dot_product = torch.sum(normals * center_to_camera, dim=-1, keepdim=True)
+    normals = torch.where(dot_product < 0, -normals, normals)
+    
+    # Normalize
+    normals = F.normalize(normals, dim=-1)
+    
     return normals
 
 def estimate_curvature(points, knn_idx):
     """
-    Estimate local curvature of points.
+    Estimate local curvature of points using PCA ratio.
     Args:
-        points: Tensor of shape (B, N, 3).
-        knn_idx: Indices of k nearest neighbors, of shape (B, N, k).
+        points: Tensor of shape (B, N, 3) or (B, 3, N)
+        knn_idx: Indices of k nearest neighbors, of shape (B, N, k)
     Returns:
-        Curvature tensor of shape (B, N, 1).
+        Curvature tensor of shape (B, N, 1)
     """
-    local_points = compute_local_features(points, knn_idx)
-    distances = torch.norm(local_points - points.unsqueeze(2), dim=-1)
-    curvature = distances.mean(dim=2, keepdim=True)  # Approximate curvature by mean distance
-    return curvature
-
-def normalize_quaternion(quaternion):
-    """
-    Normalize quaternion to unit length.
-    Args:
-        quaternion: Tensor of shape (B, 4).
-    Returns:
-        Normalized quaternion of shape (B, 4).
-    """
-    return quaternion / torch.norm(quaternion, dim=-1, keepdim=True)
-
-def quaternion_magnitude(quaternion):
-    """
-    Compute quaternion rotation magnitude.
-    Args:
-        quaternion: Tensor of shape (B, 4).
-    Returns:
-        Magnitude of the quaternion rotations.
-    """
-    w = quaternion[..., 3]
-    angle = 2 * torch.acos(torch.clamp(w, -1.0, 1.0))  # Compute rotation angle
-    return angle
-
-def clip_rotation(quaternion, max_angle):
-    """
-    Clip rotation represented by quaternion to maximum angle.
-    Args:
-        quaternion: Tensor of shape (B, 4).
-        max_angle: Maximum allowable rotation angle in radians.
-    Returns:
-        Quaternion clipped to the maximum angle.
-    """
-    angle = quaternion_magnitude(quaternion)
-    scale = torch.ones_like(angle)
-    mask = angle > max_angle
-    scale[mask] = max_angle / angle[mask]
-    quaternion = quaternion * scale.unsqueeze(-1)
-    return normalize_quaternion(quaternion)
+    if points.shape[1] == 3:
+        points = points.transpose(1, 2)  # Convert to (B, N, 3)
+        
+    local_points = compute_local_features(points, knn_idx)  # (B, N, k, 3)
+    batch_size, num_points, k, _ = local_points.shape
+    
+    # Center the neighborhood points
+    mean = torch.mean(local_points, dim=2, keepdim=True)  # (B, N, 1, 3)
+    centered = local_points - mean  # (B, N, k, 3)
+    
+    # Compute covariance matrices
+    centered_t = centered.transpose(2, 3)  # (B, N, 3, k)
+    covariance = torch.matmul(centered_t, centered)  # (B, N, 3, 3)
+    
+    # Compute eigenvalues
+    try:
+        eigenvalues = torch.linalg.eigvalsh(covariance)  # (B, N, 3)
+    except:
+        # If eigendecomposition fails, add small epsilon to diagonal
+        eps = 1e-7
+        eye = torch.eye(3, device=covariance.device).view(1, 1, 3, 3)
+        covariance = covariance + eps * eye
+        eigenvalues = torch.linalg.eigvalsh(covariance)
+    
+    # Sort eigenvalues in ascending order
+    eigenvalues, _ = torch.sort(eigenvalues, dim=-1)  # (B, N, 3)
+    
+    # Compute curvature as ratio of smallest to sum of eigenvalues
+    curvature = eigenvalues[:, :, 0] / (torch.sum(eigenvalues, dim=-1) + 1e-10)
+    
+    return curvature.unsqueeze(-1)  # (B, N, 1)
