@@ -350,6 +350,7 @@ class VisibilityModule(nn.Module):
             vis_mask: (B, N) boolean visibility mask
         """
         batch_size, num_points, _ = point_cloud.shape
+        print(f'point clout shape {point_cloud.shape}')
         
         # Split pose into rotation and translation
         quat = pose[:, :4, :]  # (B, 4, N)
@@ -357,15 +358,16 @@ class VisibilityModule(nn.Module):
         
         # Convert quaternions to rotation matrices
         R = quaternion_to_matrix(quat)  # (B, 3, 3, N)
-        
-        # Reshape point cloud for batch matrix multiplication
-        points_expanded = point_cloud.transpose(1, 2).unsqueeze(-1)  # (B, 3, 1, N)
-        
-        # Transform points to camera frame
+    
         # Matmul with R: (B, 3, 3, N) @ (B, 3, 1, N) -> (B, 3, 1, N)
-        transformed_points = torch.matmul(R, points_expanded).squeeze(-2)  # (B, 3, N)
+        # transformed_points = torch.matmul(R, points_expanded).squeeze(-2)  # (B, 3, N)
+        points_expanded = point_cloud.transpose(1, 2).unsqueeze(2)  # (B, 3, 1, N)
+        R = R.permute(0, 3, 1, 2)  # (B, N, 3, 3)
+        points_expanded = points_expanded.permute(0, 3, 1, 2)  # (B, N, 3, 1)
+        transformed_points = torch.matmul(R, points_expanded).squeeze(-1)  # (B, N, 3)
+        transformed_points = transformed_points.permute(0, 2, 1)  # (B, 3, N)
         transformed_points = transformed_points + trans  # (B, 3, N)
-        
+
         # Convert to (B, N, 3) for projection
         transformed_points = transformed_points.transpose(1, 2)  # (B, N, 3)
         
@@ -592,16 +594,24 @@ def project_to_2d(points_3d, intrinsics=None):
     Project 3D points to 2D using camera intrinsics.
     Args:
         points_3d: Tensor of shape (B, N, 3)
-        intrinsics: Camera intrinsic matrix of shape (3, 3)
+        intrinsics: Camera intrinsic matrix of shape (3, 3) or (4, 4)
     Returns:
         Tensor of shape (B, N, 2), representing 2D projections
     """
+    print(f'points shape check: {points_3d.shape}')
     batch_size, num_points, _ = points_3d.shape
     
     if intrinsics is None:
         intrinsics = torch.tensor([[1, 0, 0],
-                                 [0, 1, 0],
-                                 [0, 0, 1]], dtype=points_3d.dtype, device=points_3d.device)
+                                   [0, 1, 0],
+                                   [0, 0, 1]], dtype=points_3d.dtype, device=points_3d.device)
+    
+    if intrinsics.shape == (3, 3):
+        # Expand intrinsics to (4, 4)
+        intrinsics = torch.cat([
+            torch.cat([intrinsics, torch.zeros(3, 1, device=intrinsics.device)], dim=1),
+            torch.tensor([[0, 0, 0, 1]], dtype=intrinsics.dtype, device=intrinsics.device)
+        ], dim=0)
     
     # Add homogeneous coordinate
     points_3d_homo = torch.cat([points_3d, torch.ones(batch_size, num_points, 1, device=points_3d.device)], dim=-1)  # (B, N, 4)
@@ -610,13 +620,14 @@ def project_to_2d(points_3d, intrinsics=None):
     points_3d_homo = points_3d_homo.view(batch_size * num_points, -1)  # (B*N, 4)
     
     # Project points
-    projected_points = torch.matmul(points_3d_homo, intrinsics.t())  # (B*N, 3)
-    projected_points = projected_points.view(batch_size, num_points, -1)  # (B, N, 3)
+    projected_points = torch.matmul(points_3d_homo, intrinsics.t())  # (B*N, 4)
+    projected_points = projected_points.view(batch_size, num_points, -1)  # (B, N, 4)
     
     # Normalize homogeneous coordinates
     projected_points = projected_points[..., :2] / (projected_points[..., 2:3] + 1e-10)  # (B, N, 2)
     
     return projected_points
+
 
 def compute_depth_map(projected_points, points_3d):
     """
