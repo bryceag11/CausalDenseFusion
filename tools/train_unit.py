@@ -20,7 +20,7 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
-from datasets.ycb.dataset_unit import PoseDataset as PoseDataset_ycb
+from datasets.ycb.dataset import PoseDataset as PoseDataset_ycb
 from datasets.linemod.dataset import PoseDataset as PoseDataset_linemod
 from lib.network import PoseNet, CausalRefineNet
 from lib.loss import Loss
@@ -30,8 +30,8 @@ from lib.utils import setup_logger
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default = 'ycb', help='ycb or linemod')
 parser.add_argument('--dataset_root', type=str, default = '', help='dataset root dir (''YCB_Video_Dataset'' or ''Linemod_preprocessed'')')
-parser.add_argument('--batch_size', type=int, default = 8, help='batch size')
-parser.add_argument('--workers', type=int, default = 10, help='number of data loading workers')
+parser.add_argument('--batch_size', type=int, default = 32, help='batch size')
+parser.add_argument('--workers', type=int, default = 20, help='number of data loading workers')
 parser.add_argument('--lr', default=0.0001, help='learning rate')
 parser.add_argument('--lr_rate', default=0.3, help='learning rate decay rate')
 parser.add_argument('--w', default=0.015, help='learning rate')
@@ -40,7 +40,7 @@ parser.add_argument('--decay_margin', default=0.016, help='margin to decay lr & 
 parser.add_argument('--refine_margin', default=0.013, help='margin to start the training of iterative refinement')
 parser.add_argument('--noise_trans', default=0.03, help='range of the random noise of translation added to the training data')
 parser.add_argument('--iteration', type=int, default = 2, help='number of refinement iterations')
-parser.add_argument('--nepoch', type=int, default=500, help='max number of epochs to train')
+parser.add_argument('--nepoch', type=int, default=100, help='max number of epochs to train')
 parser.add_argument('--resume_posenet', type=str, default = '',  help='resume PoseNet model')
 parser.add_argument('--resume_refinenet', type=str, default = '',  help='resume PoseRefineNet model')
 parser.add_argument('--start_epoch', type=int, default = 1, help='which epoch to start')
@@ -133,7 +133,7 @@ def main():
         logger.info('Train time {0}'.format(time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)) + ', ' + 'Training started'))
         train_count = 0
         train_dis_avg = 0.0
-        if epoch == 1:  # Enable refinement after the first epoch
+        if epoch == 10:  # Enable refinement after the first epoch
             opt.refine_start = True
         if opt.refine_start:
             estimator.eval()
