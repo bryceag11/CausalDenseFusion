@@ -26,14 +26,15 @@ from lib.network import PoseNet, PoseRefineNet, SCMPoseRefiner
 from lib.loss import Loss
 from lib.loss_refiner import Loss_refine, SCMLoss
 from lib.utils import setup_logger
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default = 'ycb', help='ycb or linemod')
 parser.add_argument('--dataset_root', type=str, default = 'datasets\ycb\YCB_Video_Dataset', help='dataset root dir (''YCB_Video_Dataset'' or ''Linemod_preprocessed'')')
-parser.add_argument('--batch_size', type=int, default = 16, help='batch size')
+parser.add_argument('--batch_size', type=int, default = 32, help='batch size')
 parser.add_argument('--workers', type=int, default = 16, help='number of data loading workers')
-parser.add_argument('--lr', default=0.0001, help='learning rate')
-parser.add_argument('--lr_rate', default=0.3, help='learning rate decay rate')
+parser.add_argument('--lr', default=0.00001, help='learning rate')
+parser.add_argument('--lr_rate', default=0.5, help='learning rate decay rate')
 parser.add_argument('--w', default=0.015, help='learning rate')
 parser.add_argument('--w_rate', default=0.3, help='learning rate decay rate')
 parser.add_argument('--decay_margin', default=0.016, help='margin to decay lr & w')
@@ -97,6 +98,8 @@ def main():
         opt.decay_start = False
         optimizer = optim.Adam(estimator.parameters(), lr=opt.lr)
 
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=2000, gamma=opt.lr_rate)
+
     if opt.dataset == 'ycb':
         dataset = PoseDataset_ycb('train', opt.num_points, True, opt.dataset_root, opt.noise_trans, opt.refine_start)
     elif opt.dataset == 'ycb_jpg':
@@ -131,9 +134,11 @@ def main():
     for epoch in range(opt.start_epoch, opt.nepoch):
         logger = setup_logger('epoch%d' % epoch, os.path.join(opt.log_dir, 'epoch_%d_log.txt' % epoch))
         logger.info('Train time {0}'.format(time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)) + ', ' + 'Training started'))
+        
         train_count = 0
         train_dis_avg = 0.0
-        if epoch == 1:  # Enable refinement after the first epoch
+        batch_count = 0
+        if epoch == 1:
             opt.refine_start = True
         if opt.refine_start:
             estimator.eval()
@@ -141,6 +146,9 @@ def main():
         else:
             estimator.train()
         optimizer.zero_grad()
+
+        total_batches = len(dataloader) * opt.repeat_epoch
+        pbar = tqdm(total=total_batches, desc=f'Epoch {epoch}')
 
         for rep in range(opt.repeat_epoch):
                     for i, data in enumerate(dataloader, 0):
@@ -182,7 +190,6 @@ def main():
                                     # Add batch dimension
                                     symmetry_transform = symmetry_transform.unsqueeze(0) # Here the symmetry is incorrect
                                     interventions['symmetry'] = symmetry_transform # should the symmery and view have the same dimension? since it creates a 3\
-                                    # 3x3 matrix? why not 4x4
                                     
                                 # SCM refinement
                                 pred_r, pred_t = refiner(new_points, emb, initial_pose, idx, interventions)
@@ -193,12 +200,9 @@ def main():
                                     pred_r, pred_t, new_target, model_points, 
                                     new_points, features, interventions
                                 )
-                                print(losses['total_loss'].dtype)
                                 losses['total_loss'].backward(retain_graph=True)
                                 
                                 dis = losses.get('pose_loss', torch.tensor(0.0))
-                                train_dis_avg += dis.item()
-                                logger.info(f"Loss: {dis}")
                                 # Update points for next iteration
                                 new_points = refiner.do_intervention(new_points, 'view', view_transform) if 'view' in interventions else new_points
                         else:
@@ -206,23 +210,29 @@ def main():
                             
                         train_dis_avg += dis.item()
                         train_count += 1
+                        avg_loss = train_dis_avg / train_count
+
+                        pbar.update(1)
+                        pbar.set_postfix({'Loss': f'{avg_loss:.6f}'})
 
                         if train_count % opt.batch_size == 0:
-                            logger.info('Train time {0} Epoch {1} Batch {2} Frame {3} Avg_dis:{4}'.format(
-                                time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)), 
-                                epoch, int(train_count / opt.batch_size), train_count, 
-                                train_dis_avg / opt.batch_size))
+                            torch.nn.utils.clip_grad_norm_(refiner.parameters(), max_norm=10.0)
                             optimizer.step()
                             optimizer.zero_grad()
-                            train_dis_avg = 0
 
                         if train_count != 0 and train_count % 1000 == 0:
                             if opt.refine_start:
                                 torch.save(refiner.state_dict(), '{0}/pose_refine_model_current.pth'.format(opt.outf))
                             else:
                                 torch.save(estimator.state_dict(), '{0}/pose_model_current.pth'.format(opt.outf))
+        pbar.close()
+        # Log epoch summary
+        train_dis_avg = train_dis_avg / train_count
+        logger.info('Epoch {0} finished - Average Loss: {1:.6f}'.format(epoch, train_dis_avg))
 
-        print('>>>>>>>>----------epoch {0} train finish---------<<<<<<<<'.format(epoch))
+        print('>>>>>>>>----------epoch {0} train finish | Avg Loss: {1:.6f}---------<<<<<<<<'.format(epoch, train_dis_avg))
+        scheduler.step()
+
 
 
         logger = setup_logger('epoch%d_test' % epoch, os.path.join(opt.log_dir, 'epoch_%d_test_log.txt' % epoch))
@@ -231,6 +241,8 @@ def main():
         test_count = 0
         estimator.eval()
         refiner.eval()
+
+        test_pbar = tqdm(testdataloader, desc=f'Testing Epoch {epoch}')
 
         for j, data in enumerate(testdataloader, 0):
             points, choose, img, target, model_points, idx = data
@@ -257,12 +269,13 @@ def main():
                     dis = losses.get('pose_loss', torch.tensor(0.0))
 
             test_dis += dis.item()
-            logger.info('Test time {0} Test Frame No.{1} dis:{2}'.format(time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)), test_count, dis))
-
             test_count += 1
+            test_pbar.set_postfix({'Avg Loss': f'{test_dis/test_count:.6f}'})
+
+        test_pbar.close()
 
         test_dis = test_dis / test_count
-        logger.info('Test time {0} Epoch {1} TEST FINISH Avg dis: {2}'.format(time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)), epoch, test_dis))
+        print('>>>>>>>>----------Epoch {0} test complete | Avg Loss: {1:.6f}---------<<<<<<<<'.format(epoch, test_dis))
         if test_dis <= best_test:
             best_test = test_dis
             if opt.refine_start:
@@ -281,6 +294,7 @@ def main():
             opt.refine_start = True
             opt.batch_size = int(opt.batch_size / opt.iteration)
             optimizer = optim.Adam(refiner.parameters(), lr=opt.lr)
+            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=2000, gamma=opt.lr_rate)
 
             if opt.dataset == 'ycb':
                 dataset = PoseDataset_ycb('train', opt.num_points, True, opt.dataset_root, opt.noise_trans, opt.refine_start)

@@ -534,7 +534,17 @@ class SCMPoseRefiner(nn.Module):
         
         # f1: Geometric Feature Extraction
         self.geometric_features = GeometricFeatureExtractor(num_points)
+
+        # Add layer normalization
+        self.layer_norm = nn.LayerNorm(normalized_shape=128)
         
+        # Initialize weights properly
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                    
         # f2,f3: Residual Computation 
         self.residual_net = nn.Sequential(
             nn.Linear(128 + 7, 512),  # 128 from geo features + 7 for pose (quat + trans)
@@ -594,7 +604,6 @@ class SCMPoseRefiner(nn.Module):
                 points = points.unsqueeze(0)
             if points.shape[1] == 3:  # If points are [B, 3, N]
                 points = points.transpose(1, 2)  # Convert to [B, N, 3]
-            print(f"points: {points.shape}")
             if intervention_value.dim() == 2:
                 intervention_value = intervention_value.unsqueeze(0)
                 print(f"Intervention Value: {intervention_value.shape}")

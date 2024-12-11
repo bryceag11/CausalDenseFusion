@@ -103,6 +103,13 @@ class SCMLoss(nn.Module):
         self.num_pt_mesh = num_points_mesh
         self.sym_list = sym_list
         
+        # Add loss scaling factors
+        self.loss_weights = {
+            'pose_loss': 1.0,
+            'view_loss': 0.1,
+            'symmetry_loss': 0.1,
+            'backdoor_loss': 0.01
+        }
 
     @staticmethod
     def safe_tensor(value, device):
@@ -148,7 +155,6 @@ class SCMLoss(nn.Module):
                          (2.0*pred_r[:, :, 0]*pred_r[:, :, 1] + 2.0*pred_r[:, :, 2]*pred_r[:, :, 3]).view(bs, num_p, 1), \
                          (1.0 - 2.0*(pred_r[:, :, 1]**2 + pred_r[:, :, 2]**2)).view(bs, num_p, 1)), dim=2).contiguous().view(bs * num_p, 3, 3)
         
-        base = base.transpose(2, 1)
         
         # Reshape points for transformation
         model_points = model_points.view(bs, 1, self.num_pt_mesh, 3).repeat(1, num_p, 1, 1).view(bs * num_p, self.num_pt_mesh, 3)
@@ -158,8 +164,12 @@ class SCMLoss(nn.Module):
         # Apply transformation
         pred = torch.add(torch.bmm(model_points, base), pred_t)
         
+        dis = torch.mean(torch.norm((pred - target), dim=2))
+        if dis > 1:
+            print(f"pred_r: {pred_r}")
+            print(f"pred_r: {pred_t}")
         # Compute distance loss
-        return torch.mean(torch.norm((pred - target), dim=2))
+        return dis
     def compute_intervention_loss(self, relational_features: torch.Tensor, intervention: torch.Tensor) -> torch.Tensor:
         """
         Compute loss between relational features under intervention.
@@ -241,17 +251,17 @@ class SCMLoss(nn.Module):
         
         # Initialize losses dictionary
         losses = {'pose_loss': pose_loss}
-        
         # Compute intervention losses if provided
         if interventions is not None:
             if 'view' in interventions:
                 view_loss = self.compute_intervention_loss(features['relational'], interventions['view'])
                 losses['view_loss'] = view_loss
-
+                # print(f"view:{view_loss}")
             ### ? why symmetry? difference?? 
             if 'symmetry' in interventions:
                 sym_loss = self.compute_intervention_loss(features['relational'], interventions['symmetry'])
                 losses['symmetry_loss'] = sym_loss
+                # print(f"sym:{sym_loss}")
 
         # Compute backdoor loss
         backdoor_loss = self.compute_backdoor_loss(features).float()
@@ -264,4 +274,8 @@ class SCMLoss(nn.Module):
                 total_loss = total_loss + 0.1 * loss.float()
 
         losses['total_loss'] = total_loss
+
+
+        print(f"Pose Loss: {pose_loss}")
+
         return losses
