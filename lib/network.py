@@ -380,9 +380,9 @@ class GeometricFeatureExtractor(nn.Module):
             global_feat = torch.max(features, dim=2, keepdim=True)[0]
         
         return {
-            'relational': features.contiguous(),
-            'local': features.contiguous(),
-            'global': global_feat.contiguous()
+            'relational': features.contiguous().float(),
+            'local': features.contiguous().float(),
+            'global': global_feat.contiguous().float()
         }
 
 
@@ -718,8 +718,8 @@ class SCMPoseRefiner(nn.Module):
         
         # Select object-specific predictions 
         b = 0
-        pred_r = torch.index_select(pred_r[b].view(1, 4), 0, obj[b])
-        pred_t = torch.index_select(pred_t[b].view(1, 3), 0, obj[b])
+        obj_clipped = torch.clamp(obj, 0, pred_r.size(0) - 1)
+        pred_r = torch.index_select(pred_r[b].view(1, 4), 0, obj_clipped[b])
+        pred_t = torch.index_select(pred_t[b].view(1, 3), 0, obj_clipped[b])
         
         return pred_r, pred_t
-

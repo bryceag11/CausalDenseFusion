@@ -40,7 +40,7 @@ parser.add_argument('--decay_margin', default=0.016, help='margin to decay lr & 
 parser.add_argument('--refine_margin', default=0.013, help='margin to start the training of iterative refinement')
 parser.add_argument('--noise_trans', default=0.03, help='range of the random noise of translation added to the training data')
 parser.add_argument('--iteration', type=int, default = 2, help='number of refinement iterations')
-parser.add_argument('--nepoch', type=int, default=500, help='max number of epochs to train')
+parser.add_argument('--nepoch', type=int, default=100, help='max number of epochs to train')
 parser.add_argument('--resume_posenet', type=str, default = 'pose_model_368_0.030526180794098117.pth',  help='resume PoseNet model')
 parser.add_argument('--resume_refinenet', type=str, default = '',  help='resume PoseRefineNet model')
 parser.add_argument('--start_epoch', type=int, default = 1, help='which epoch to start')
@@ -78,7 +78,7 @@ def main():
     estimator = PoseNet(num_points = opt.num_points, num_obj = opt.num_objects)
     estimator.cuda()
     # refiner = PoseRefineNet(num_points = opt.num_points, num_obj = opt.num_objects)
-    refiner = SCMPoseRefiner(num_points=opt.num_points, num_obj=opt.num_objects)
+    refiner = SCMPoseRefiner(num_points=opt.num_points, num_obj=opt.num_objects).float()
     refiner.cuda()
 
     if opt.resume_posenet != '':
@@ -180,8 +180,9 @@ def main():
                                     symmetry_transform = torch.eye(3).cuda()
                                     symmetry_transform[0,0] = -1  # Mirror across YZ plane
                                     # Add batch dimension
-                                    symmetry_transform = symmetry_transform.unsqueeze(0)
-                                    interventions['symmetry'] = symmetry_transform
+                                    symmetry_transform = symmetry_transform.unsqueeze(0) # Here the symmetry is incorrect
+                                    interventions['symmetry'] = symmetry_transform # should the symmery and view have the same dimension? since it creates a 3\
+                                    # 3x3 matrix? why not 4x4
                                     
                                 # SCM refinement
                                 pred_r, pred_t = refiner(new_points, emb, initial_pose, idx, interventions)
@@ -192,7 +193,8 @@ def main():
                                     pred_r, pred_t, new_target, model_points, 
                                     new_points, features, interventions
                                 )
-                                losses['total_loss'].backward()
+                                print(losses['total_loss'].dtype)
+                                losses['total_loss'].backward(retain_graph=True)
                                 
                                 dis = losses.get('pose_loss', torch.tensor(0.0))
                                 train_dis_avg += dis.item()
@@ -242,12 +244,16 @@ def main():
             _, dis, new_points, new_target = criterion(pred_r, pred_t, pred_c, target, model_points, idx, points, opt.w, opt.refine_start)
 
             if opt.refine_start:
-                initial_pose = torch.cat([pred_r, pred_t], dim=1)
+                initial_pose = torch.cat([pred_r, pred_t], dim=2)
+                initial_pose = initial_pose.permute(0,2,1)
                 for ite in range(0, opt.iteration):
                     # Test without interventions
-                    pred_r, pred_t = refiner(new_points, emb, initial_pose, idx)
+                    pred_r, pred_t = refiner(new_points, emb, initial_pose, idx, interventions)
                     features = refiner.geometric_features(new_points)
-                    losses = scm_criterion(pred_r, pred_t, new_target, model_points, new_points, features, idx)
+                    losses = scm_criterion(
+                                    pred_r, pred_t, new_target, model_points, 
+                                    new_points, features, interventions
+                                )
                     dis = losses.get('pose_loss', torch.tensor(0.0))
 
             test_dis += dis.item()

@@ -160,32 +160,46 @@ class SCMLoss(nn.Module):
         
         # Compute distance loss
         return torch.mean(torch.norm((pred - target), dim=2))
+    def compute_intervention_loss(self, relational_features: torch.Tensor, intervention: torch.Tensor) -> torch.Tensor:
+        """
+        Compute loss between relational features under intervention.
 
-    def compute_intervention_loss(self, features: torch.Tensor, intervention: torch.Tensor) -> torch.Tensor:
-        """
-        Compute loss between features under intervention.
-        
         Args:
-            features: Point features [B, C, N]
-            intervention: Transformation matrix [B, 4, 4]
+            relational_features: Relational point features [B, C, N]
+            intervention: Transformation matrix [B, 4, 4] or [B, 3, 3]
+
+        Returns:
+            Loss value as a single tensor.
         """
-        # Get feature shape
-        B, C, N = features.shape
-        
-        # Reshape features for spatial transformation
-        features_points = features.transpose(1, 2)  # [B, N, C]
-        
-        # Take first 3 dimensions for spatial features
-        spatial_feats = features_points[..., :3]  # [B, N, 3]
-        
+        B, C, N = relational_features.shape
+
+        # Validate intervention shape
+        if intervention.shape[-2:] == (3, 3):
+            # If intervention is [B, 3, 3], adjust homog_feats
+            features_points = relational_features.transpose(1, 2)  # [B, N, C]
+            spatial_feats = features_points[..., :3]  # [B, N, 3]
+            
+            ones = torch.ones(B, N, 1, device=relational_features.device)  # Homogeneous coordinate
+            homog_feats = torch.cat([spatial_feats, ones], dim=-1)  # [B, N, 4]
+            homog_feats = homog_feats[..., :3]  # Adjust for [B, 3, 3] intervention
+        elif intervention.shape[-2:] == (4, 4):
+            # If intervention is [B, 4, 4], process normally
+            features_points = relational_features.transpose(1, 2)  # [B, N, C]
+            spatial_feats = features_points[..., :3]  # [B, N, 3]
+
+            ones = torch.ones(B, N, 1, device=relational_features.device)  # Homogeneous coordinate
+            homog_feats = torch.cat([spatial_feats, ones], dim=-1)  # [B, N, 4]
+        else:
+            raise ValueError(f"Unexpected intervention shape {intervention.shape}, expected [B, 4, 4] or [B, 3, 3]")
+
         # Apply transformation
-        ones = torch.ones(B, N, 1, device=features.device)
-        homog_feats = torch.cat([spatial_feats, ones], dim=-1)  # [B, N, 4]
         transformed = torch.bmm(homog_feats, intervention.transpose(1, 2))
-        transformed = transformed[..., :3]  # Remove homogeneous coordinate
-        
+        transformed = transformed[..., :3]  # Remove homogeneous coordinate if applicable
+
         # Compute feature consistency loss
         return F.mse_loss(transformed, spatial_feats)
+
+
 
     def compute_backdoor_loss(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -218,6 +232,9 @@ class SCMLoss(nn.Module):
         """
         # Ensure all inputs are on same device
         device = pred_r.device
+
+        #features['relational'] = torch.nan_to_num(features['relational'], nan=0.0, posinf=1e6, neginf=-1e6)
+
         
         # Compute base pose loss
         pose_loss = self.compute_pose_loss(pred_r, pred_t, target, model_points)
@@ -231,19 +248,20 @@ class SCMLoss(nn.Module):
                 view_loss = self.compute_intervention_loss(features['relational'], interventions['view'])
                 losses['view_loss'] = view_loss
 
+            ### ? why symmetry? difference?? 
             if 'symmetry' in interventions:
                 sym_loss = self.compute_intervention_loss(features['relational'], interventions['symmetry'])
                 losses['symmetry_loss'] = sym_loss
 
         # Compute backdoor loss
-        backdoor_loss = self.compute_backdoor_loss(features)
+        backdoor_loss = self.compute_backdoor_loss(features).float()
         losses['backdoor_loss'] = backdoor_loss
-
+ 
         # Compute total loss with weighting
-        total_loss = pose_loss
+        total_loss = pose_loss.float()
         for name, loss in losses.items():
             if name != 'pose_loss':
-                total_loss = total_loss + 0.1 * loss
+                total_loss = total_loss + 0.1 * loss.float()
 
         losses['total_loss'] = total_loss
         return losses
