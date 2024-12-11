@@ -22,14 +22,14 @@ import torchvision.utils as vutils
 from torch.autograd import Variable
 from datasets.ycb.dataset import PoseDataset as PoseDataset_ycb
 from datasets.linemod.dataset import PoseDataset as PoseDataset_linemod
-from lib.network import PoseNet, PoseRefineNet
+from lib.network import PoseNet, PoseRefineNet, SCMPoseRefiner
 from lib.loss import Loss
-from lib.loss_refiner import Loss_refine
+from lib.loss_refiner import Loss_refine, SCMLoss
 from lib.utils import setup_logger
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default = 'ycb', help='ycb or linemod')
-parser.add_argument('--dataset_root', type=str, default = '', help='dataset root dir (''YCB_Video_Dataset'' or ''Linemod_preprocessed'')')
+parser.add_argument('--dataset_root', type=str, default = 'datasets\ycb\YCB_Video_Dataset', help='dataset root dir (''YCB_Video_Dataset'' or ''Linemod_preprocessed'')')
 parser.add_argument('--batch_size', type=int, default = 16, help='batch size')
 parser.add_argument('--workers', type=int, default = 16, help='number of data loading workers')
 parser.add_argument('--lr', default=0.0001, help='learning rate')
@@ -41,7 +41,7 @@ parser.add_argument('--refine_margin', default=0.013, help='margin to start the 
 parser.add_argument('--noise_trans', default=0.03, help='range of the random noise of translation added to the training data')
 parser.add_argument('--iteration', type=int, default = 2, help='number of refinement iterations')
 parser.add_argument('--nepoch', type=int, default=500, help='max number of epochs to train')
-parser.add_argument('--resume_posenet', type=str, default = '',  help='resume PoseNet model')
+parser.add_argument('--resume_posenet', type=str, default = 'pose_model_368_0.030526180794098117.pth',  help='resume PoseNet model')
 parser.add_argument('--resume_refinenet', type=str, default = '',  help='resume PoseRefineNet model')
 parser.add_argument('--start_epoch', type=int, default = 1, help='which epoch to start')
 parser.add_argument('--num_obj', type=int, default=8, help='number of object classes in the dataset')
@@ -77,7 +77,8 @@ def main():
 
     estimator = PoseNet(num_points = opt.num_points, num_obj = opt.num_objects)
     estimator.cuda()
-    refiner = PoseRefineNet(num_points = opt.num_points, num_obj = opt.num_objects)
+    # refiner = PoseRefineNet(num_points = opt.num_points, num_obj = opt.num_objects)
+    refiner = SCMPoseRefiner(num_points=opt.num_points, num_obj=opt.num_objects)
     refiner.cuda()
 
     if opt.resume_posenet != '':
@@ -118,7 +119,7 @@ def main():
     print('>>>>>>>>----------Dataset loaded!---------<<<<<<<<\nlength of the training set: {0}\nlength of the testing set: {1}\nnumber of sample points on mesh: {2}\nsymmetry object list: {3}'.format(len(dataset), len(test_dataset), opt.num_points_mesh, opt.sym_list))
 
     criterion = Loss(opt.num_points_mesh, opt.sym_list)
-    criterion_refine = Loss_refine(opt.num_points_mesh, opt.sym_list)
+    scm_criterion = SCMLoss(num_points_mesh=opt.num_points_mesh, sym_list=opt.sym_list)
 
     best_test = np.Inf
 
@@ -132,6 +133,8 @@ def main():
         logger.info('Train time {0}'.format(time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)) + ', ' + 'Training started'))
         train_count = 0
         train_dis_avg = 0.0
+        if epoch == 1:  # Enable refinement after the first epoch
+            opt.refine_start = True
         if opt.refine_start:
             estimator.eval()
             refiner.train()
@@ -140,39 +143,82 @@ def main():
         optimizer.zero_grad()
 
         for rep in range(opt.repeat_epoch):
-            for i, data in enumerate(dataloader, 0):
-                points, choose, img, target, model_points, idx = data
-                points, choose, img, target, model_points, idx = Variable(points).cuda(), \
-                                                                 Variable(choose).cuda(), \
-                                                                 Variable(img).cuda(), \
-                                                                 Variable(target).cuda(), \
-                                                                 Variable(model_points).cuda(), \
-                                                                 Variable(idx).cuda()
-                pred_r, pred_t, pred_c, emb = estimator(img, points, choose, idx)
-                loss, dis, new_points, new_target = criterion(pred_r, pred_t, pred_c, target, model_points, idx, points, opt.w, opt.refine_start)
-                
-                if opt.refine_start:
-                    for ite in range(0, opt.iteration):
-                        pred_r, pred_t = refiner(new_points, emb, idx)
-                        dis, new_points, new_target = criterion_refine(pred_r, pred_t, new_target, model_points, idx, new_points)
-                        dis.backward()
-                else:
-                    loss.backward()
+                    for i, data in enumerate(dataloader, 0):
+                        points, choose, img, target, model_points, idx = data
+                        points, choose, img, target, model_points, idx = Variable(points).cuda(), \
+                                                                        Variable(choose).cuda(), \
+                                                                        Variable(img).cuda(), \
+                                                                        Variable(target).cuda(), \
+                                                                        Variable(model_points).cuda(), \
+                                                                        Variable(idx).cuda()
+                        # Initial DenseFusion estimation
+                        pred_r, pred_t, pred_c, emb = estimator(img, points, choose, idx)
+                        loss, dis, new_points, new_target = criterion(pred_r, pred_t, pred_c, target, model_points, idx, points, opt.w, opt.refine_start)
+                        
+                        if opt.refine_start:
+                            pred_r = pred_r.permute(0, 2, 1)  # Shape: (num_obj, 4, N)
+                            pred_t = pred_t.permute(0, 2, 1)  # Shape: (num_obj, 3, N)
+                            initial_pose = torch.cat([pred_r, pred_t], dim=1)  # Shape: (num_obj, 7, N)
 
-                train_dis_avg += dis.item()
-                train_count += 1
 
-                if train_count % opt.batch_size == 0:
-                    logger.info('Train time {0} Epoch {1} Batch {2} Frame {3} Avg_dis:{4}'.format(time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)), epoch, int(train_count / opt.batch_size), train_count, train_dis_avg / opt.batch_size))
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    train_dis_avg = 0
+                            for ite in range(0, opt.iteration):
+                                # Generate random view intervention
+                                interventions = {}
+                                if ite % 2 == 0:
+                                    # Random rotation around z-axis for view intervention
+                                    angle = torch.rand(1).cuda() * 2 * np.pi
+                                    c, s = torch.cos(angle), torch.sin(angle)
+                                    view_transform = torch.eye(4).cuda()
+                                    view_transform[0,0], view_transform[0,1] = c, -s
+                                    view_transform[1,0], view_transform[1,1] = s, c
+                                    # Add batch dimension
+                                    view_transform = view_transform.unsqueeze(0)
+                                    interventions['view'] = view_transform
+                                    
+                                # Add symmetry intervention if object is symmetric
+                                if idx[0].item() in opt.sym_list:
+                                    symmetry_transform = torch.eye(3).cuda()
+                                    symmetry_transform[0,0] = -1  # Mirror across YZ plane
+                                    # Add batch dimension
+                                    symmetry_transform = symmetry_transform.unsqueeze(0)
+                                    interventions['symmetry'] = symmetry_transform
+                                    
+                                # SCM refinement
+                                pred_r, pred_t = refiner(new_points, emb, initial_pose, idx, interventions)
+                                
+                                # Use SCM loss instead of criterion_refine
+                                features = refiner.geometric_features(new_points)
+                                losses = scm_criterion(
+                                    pred_r, pred_t, new_target, model_points, 
+                                    new_points, features, interventions
+                                )
+                                losses['total_loss'].backward()
+                                
+                                dis = losses.get('pose_loss', torch.tensor(0.0))
+                                train_dis_avg += dis.item()
+                                logger.info(f"Loss: {dis}")
+                                # Update points for next iteration
+                                new_points = refiner.do_intervention(new_points, 'view', view_transform) if 'view' in interventions else new_points
+                        else:
+                            loss.backward()
+                            
+                        train_dis_avg += dis.item()
+                        train_count += 1
 
-                if train_count != 0 and train_count % 1000 == 0:
-                    if opt.refine_start:
-                        torch.save(refiner.state_dict(), '{0}/pose_refine_model_current.pth'.format(opt.outf))
-                    else:
-                        torch.save(estimator.state_dict(), '{0}/pose_model_current.pth'.format(opt.outf))
+                        if train_count % opt.batch_size == 0:
+                            logger.info('Train time {0} Epoch {1} Batch {2} Frame {3} Avg_dis:{4}'.format(
+                                time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)), 
+                                epoch, int(train_count / opt.batch_size), train_count, 
+                                train_dis_avg / opt.batch_size))
+                            optimizer.step()
+                            optimizer.zero_grad()
+                            train_dis_avg = 0
+
+                        if train_count != 0 and train_count % 1000 == 0:
+                            if opt.refine_start:
+                                torch.save(refiner.state_dict(), '{0}/pose_refine_model_current.pth'.format(opt.outf))
+                            else:
+                                torch.save(estimator.state_dict(), '{0}/pose_model_current.pth'.format(opt.outf))
 
         print('>>>>>>>>----------epoch {0} train finish---------<<<<<<<<'.format(epoch))
 
@@ -196,9 +242,13 @@ def main():
             _, dis, new_points, new_target = criterion(pred_r, pred_t, pred_c, target, model_points, idx, points, opt.w, opt.refine_start)
 
             if opt.refine_start:
+                initial_pose = torch.cat([pred_r, pred_t], dim=1)
                 for ite in range(0, opt.iteration):
-                    pred_r, pred_t = refiner(new_points, emb, idx)
-                    dis, new_points, new_target = criterion_refine(pred_r, pred_t, new_target, model_points, idx, new_points)
+                    # Test without interventions
+                    pred_r, pred_t = refiner(new_points, emb, initial_pose, idx)
+                    features = refiner.geometric_features(new_points)
+                    losses = scm_criterion(pred_r, pred_t, new_target, model_points, new_points, features, idx)
+                    dis = losses.get('pose_loss', torch.tensor(0.0))
 
             test_dis += dis.item()
             logger.info('Test time {0} Test Frame No.{1} dis:{2}'.format(time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - st_time)), test_count, dis))

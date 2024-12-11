@@ -6,7 +6,8 @@ import numpy as np
 import torch.nn as nn
 import random
 import torch.backends.cudnn as cudnn
-
+from typing import Dict, List, Tuple, Optional
+import torch.nn.functional as F
 
 def knn(x, y, k=1):
     _, dim, x_size = x.shape
@@ -95,3 +96,6 @@ class Loss(_Loss):
     def forward(self, pred_r, pred_t, pred_c, target, model_points, idx, points, w, refine):
 
         return loss_calculation(pred_r, pred_t, pred_c, target, model_points, idx, points, w, refine, self.num_pt_mesh, self.sym_list)
+    
+
+
