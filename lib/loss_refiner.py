@@ -155,7 +155,7 @@ class SCMLoss(nn.Module):
                          (2.0*pred_r[:, :, 0]*pred_r[:, :, 1] + 2.0*pred_r[:, :, 2]*pred_r[:, :, 3]).view(bs, num_p, 1), \
                          (1.0 - 2.0*(pred_r[:, :, 1]**2 + pred_r[:, :, 2]**2)).view(bs, num_p, 1)), dim=2).contiguous().view(bs * num_p, 3, 3)
         
-        
+        base = base.transpose(2, 1)
         # Reshape points for transformation
         model_points = model_points.view(bs, 1, self.num_pt_mesh, 3).repeat(1, num_p, 1, 1).view(bs * num_p, self.num_pt_mesh, 3)
         target = target.view(bs, 1, self.num_pt_mesh, 3).repeat(1, num_p, 1, 1).view(bs * num_p, self.num_pt_mesh, 3)
@@ -164,12 +164,14 @@ class SCMLoss(nn.Module):
         # Apply transformation
         pred = torch.add(torch.bmm(model_points, base), pred_t)
         
-        dis = torch.mean(torch.norm((pred - target), dim=2))
+        dis = torch.mean(torch.norm((pred - target), dim=2), dim=1)
         if dis > 1:
             print(f"pred_r: {pred_r}")
             print(f"pred_r: {pred_t}")
+            scaled_dis = torch.clamp(dis, min=0.0, max=1.0)
+            return scaled_dis
         # Compute distance loss
-        return dis
+        return dis.mean()
     def compute_intervention_loss(self, relational_features: torch.Tensor, intervention: torch.Tensor) -> torch.Tensor:
         """
         Compute loss between relational features under intervention.

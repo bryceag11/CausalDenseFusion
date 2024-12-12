@@ -20,7 +20,7 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
-from datasets.ycb.dataset import PoseDataset as PoseDataset_ycb
+from datasets.ycb.dataset_unit import PoseDataset as PoseDataset_ycb
 from datasets.linemod.dataset import PoseDataset as PoseDataset_linemod
 from lib.network import PoseNet, PoseRefineNet, SCMPoseRefiner
 from lib.loss import Loss
@@ -31,9 +31,9 @@ from tqdm import tqdm
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default = 'ycb', help='ycb or linemod')
 parser.add_argument('--dataset_root', type=str, default = 'datasets\ycb\YCB_Video_Dataset', help='dataset root dir (''YCB_Video_Dataset'' or ''Linemod_preprocessed'')')
-parser.add_argument('--batch_size', type=int, default = 32, help='batch size')
+parser.add_argument('--batch_size', type=int, default = 128, help='batch size')
 parser.add_argument('--workers', type=int, default = 16, help='number of data loading workers')
-parser.add_argument('--lr', default=0.00001, help='learning rate')
+parser.add_argument('--lr', default=0.000001, help='learning rate')
 parser.add_argument('--lr_rate', default=0.5, help='learning rate decay rate')
 parser.add_argument('--w', default=0.015, help='learning rate')
 parser.add_argument('--w_rate', default=0.3, help='learning rate decay rate')
@@ -207,7 +207,14 @@ def main():
                                 new_points = refiner.do_intervention(new_points, 'view', view_transform) if 'view' in interventions else new_points
                         else:
                             loss.backward()
-                            
+                        total_norm = 0.0
+                        for name, param in refiner.named_parameters():
+                            if param.grad is not None:
+                                param_norm = param.grad.data.norm(2).item()
+                                total_norm += param_norm ** 2
+                        total_norm = total_norm ** 0.5
+                        print(f"Gradient Norm for Refiner: {total_norm}")   
+
                         train_dis_avg += dis.item()
                         train_count += 1
                         avg_loss = train_dis_avg / train_count
