@@ -358,80 +358,53 @@ class GeometricFeatureExtractor(nn.Module):
         std = tensor.std(dim=dim, keepdim=True).clamp(min=eps)
         return (tensor - mean) / std
 
+
+    def compute_local_features(self, points):
+        """Extract local geometric features"""
+        return self.local_features(points)
+        
+    def compute_global_features(self, points):
+        """Extract global geometric features with proper pooling and channel handling"""
+        # First stage feature extraction
+        x = self.global_feat_1(points)  # [B, 64, N]
+        
+        # Global max pooling
+        x_global = torch.max(x, dim=2, keepdim=True)[0]  # [B, 64, 1]
+        
+        # Second stage feature extraction (without BatchNorm)
+        x_global = self.global_feat_2(x_global)  # [B, 128, 1]
+        
+        return x_global
+        
+    def compute_relational_features(self, local_feat, global_feat):
+        """Extract relational features"""
+        combined = torch.cat([local_feat, global_feat.expand(-1, -1, local_feat.size(2))], dim=1)
+        return self.relational_features(combined)
+
     def forward(self, points):
-        # Ensure input is on the same device as the model
-        points = points.to(next(self.parameters()).device)
-        
-        # Input validation
-        # self.validate_input(points)
-        
-        # Shape handling
+        # Ensure points are in [B, 3, N] format
         if points.dim() == 2:
             points = points.unsqueeze(0)
         if points.shape[1] != 3:
-            points = points.transpose(1, 2)
+            points = points.transpose(1, 2)  # Convert from [B, N, 3] to [B, 3, N]
+        print(f"Geometric FE Points shape: {points.shape}")
+        local_feat = self.compute_local_features(points)
+        print(f"Local shape: {local_feat.shape}")
 
-        # Safe normalization
-        points_normalized = self.safe_normalize(points, dim=2)
-        
-        # Forward pass
-        with torch.amp.autocast('cuda'):
-            features = self.backbone(points_normalized)
-            global_feat = torch.max(features, dim=2, keepdim=True)[0]
-        
+        global_feat = self.compute_global_features(points)
+        print(f"Global shape: {global_feat.shape}")
+        # Expand global features to match local feature size
+        global_feat_expanded = global_feat.expand(-1, -1, self.num_points)
+        print(f"Global Expanded Shape: {global_feat_expanded.shape}")
+        # Combine features
+        combined = torch.cat([local_feat, global_feat_expanded], dim=1)
+        print(f"Combined:{combined.shape}")
+        relational_feat = self.relational_features(combined)
         return {
-            'relational': features.contiguous().float(),
-            'local': features.contiguous().float(),
-            'global': global_feat.contiguous().float()
+            'local': local_feat,
+            'global': global_feat,
+            'relational': relational_feat
         }
-
-
-    # def compute_local_features(self, points):
-    #     """Extract local geometric features"""
-    #     return self.local_features(points)
-        
-    # def compute_global_features(self, points):
-    #     """Extract global geometric features with proper pooling and channel handling"""
-    #     # First stage feature extraction
-    #     x = self.global_feat_1(points)  # [B, 64, N]
-        
-    #     # Global max pooling
-    #     x_global = torch.max(x, dim=2, keepdim=True)[0]  # [B, 64, 1]
-        
-    #     # Second stage feature extraction (without BatchNorm)
-    #     x_global = self.global_feat_2(x_global)  # [B, 128, 1]
-        
-    #     return x_global
-        
-    # def compute_relational_features(self, local_feat, global_feat):
-    #     """Extract relational features"""
-    #     combined = torch.cat([local_feat, global_feat.expand(-1, -1, local_feat.size(2))], dim=1)
-    #     return self.relational_features(combined)
-
-    # def forward(self, points):
-    #     # Ensure points are in [B, 3, N] format
-    #     if points.dim() == 2:
-    #         points = points.unsqueeze(0)
-    #     if points.shape[1] != 3:
-    #         points = points.transpose(1, 2)  # Convert from [B, N, 3] to [B, 3, N]
-    #     print(f"Geometric FE Points shape: {points.shape}")
-    #     local_feat = self.compute_local_features(points)
-    #     print(f"Local shape: {local_feat.shape}")
-
-    #     global_feat = self.compute_global_features(points)
-    #     print(f"Global shape: {global_feat.shape}")
-    #     # Expand global features to match local feature size
-    #     global_feat_expanded = global_feat.expand(-1, -1, self.num_points)
-    #     print(f"Global Expanded Shape: {global_feat_expanded.shape}")
-    #     # Combine features
-    #     combined = torch.cat([local_feat, global_feat_expanded], dim=1)
-    #     print(f"Combined:{combined.shape}")
-    #     relational_feat = self.relational_features(combined)
-    #     return {
-    #         'local': local_feat,
-    #         'global': global_feat,
-    #         'relational': relational_feat
-    #     }
 
 class SCMFeatureExtractor(nn.Module):
     """

@@ -4,6 +4,12 @@ import numpy as np
 import torch.nn as nn
 from lib.knn.__init__ import KNearestNeighbor
 
+'''
+
+Unused code
+'''
+
+
 def knn(x, y, k=1):
     # Reuse existing KNN implementation from loss_refiner.py
     _, dim, x_size = x.shape
