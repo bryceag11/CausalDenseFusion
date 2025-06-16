@@ -93,191 +93,89 @@ class Loss_refine(_Loss):
         return loss_calculation(pred_r, pred_t, target, model_points, idx, points, self.num_pt_mesh, self.sym_list)
     
 
-
 class SCMLoss(nn.Module):
     """
-    Loss function implementing SCM principles for pose refinement
+    Fixed loss function implementing proper causal objectives
     """
-    def __init__(self, num_points_mesh: int, sym_list: List[int]):
-        super(SCMLoss, self).__init__()
-        self.num_pt_mesh = num_points_mesh
+    def __init__(self, num_points_mesh: int, sym_list: list):
+        super().__init__()
+        self.num_points_mesh = num_points_mesh
         self.sym_list = sym_list
         
-        # Add loss scaling factors
-        self.loss_weights = {
-            'pose_loss': 1.0,
-            'view_loss': 0.1,
-            'symmetry_loss': 0.1,
-            'backdoor_loss': 0.01
-        }
-
-    @staticmethod
-    def safe_tensor(value, device):
-        """Safely create a tensor on the specified device"""
-        try:
-            if isinstance(value, (int, float)):
-                return torch.tensor(float(value), device=device, dtype=torch.float32)
-            elif isinstance(value, torch.Tensor):
-                return value.to(device)
-            else:
-                raise ValueError(f"Unsupported value type: {type(value)}")
-        except Exception as e:
-            print(f"Error creating tensor: {str(e)}")
-            return torch.zeros(1, device=device, requires_grad=True)
-
     def compute_pose_loss(self, pred_r: torch.Tensor, pred_t: torch.Tensor,
                          target: torch.Tensor, model_points: torch.Tensor) -> torch.Tensor:
-        """
-        Compute pose estimation loss using rotation and translation predictions.
-        
-        Args:
-            pred_r: Predicted rotation as quaternion [B, 4]
-            pred_t: Predicted translation [B, 3]
-            target: Target point positions [B, N, 3]
-            model_points: Model points [B, N, 3]
-        """
-        # Reshape inputs
-        pred_r = pred_r.view(1, 1, -1)
-        pred_t = pred_t.view(1, 1, -1)
-        bs, num_p, _ = pred_r.size()
-        
-        # Normalize quaternion
-        pred_r = pred_r / (torch.norm(pred_r, dim=2).view(bs, num_p, 1) + 1e-8)
-        
+        """Standard pose estimation loss"""
         # Convert quaternion to rotation matrix
-        base = torch.cat(((1.0 - 2.0*(pred_r[:, :, 2]**2 + pred_r[:, :, 3]**2)).view(bs, num_p, 1),\
-                         (2.0*pred_r[:, :, 1]*pred_r[:, :, 2] - 2.0*pred_r[:, :, 0]*pred_r[:, :, 3]).view(bs, num_p, 1), \
-                         (2.0*pred_r[:, :, 0]*pred_r[:, :, 2] + 2.0*pred_r[:, :, 1]*pred_r[:, :, 3]).view(bs, num_p, 1), \
-                         (2.0*pred_r[:, :, 1]*pred_r[:, :, 2] + 2.0*pred_r[:, :, 3]*pred_r[:, :, 0]).view(bs, num_p, 1), \
-                         (1.0 - 2.0*(pred_r[:, :, 1]**2 + pred_r[:, :, 3]**2)).view(bs, num_p, 1), \
-                         (-2.0*pred_r[:, :, 0]*pred_r[:, :, 1] + 2.0*pred_r[:, :, 2]*pred_r[:, :, 3]).view(bs, num_p, 1), \
-                         (-2.0*pred_r[:, :, 0]*pred_r[:, :, 2] + 2.0*pred_r[:, :, 1]*pred_r[:, :, 3]).view(bs, num_p, 1), \
-                         (2.0*pred_r[:, :, 0]*pred_r[:, :, 1] + 2.0*pred_r[:, :, 2]*pred_r[:, :, 3]).view(bs, num_p, 1), \
-                         (1.0 - 2.0*(pred_r[:, :, 1]**2 + pred_r[:, :, 2]**2)).view(bs, num_p, 1)), dim=2).contiguous().view(bs * num_p, 3, 3)
+        pred_r = F.normalize(pred_r, dim=1)
         
-        base = base.transpose(2, 1)
-        # Reshape points for transformation
-        model_points = model_points.view(bs, 1, self.num_pt_mesh, 3).repeat(1, num_p, 1, 1).view(bs * num_p, self.num_pt_mesh, 3)
-        target = target.view(bs, 1, self.num_pt_mesh, 3).repeat(1, num_p, 1, 1).view(bs * num_p, self.num_pt_mesh, 3)
-        pred_t = pred_t.contiguous().view(bs * num_p, 1, 3)
+        # Build rotation matrix from quaternion
+        w, x, y, z = pred_r[:, 0], pred_r[:, 1], pred_r[:, 2], pred_r[:, 3]
         
-        # Apply transformation
-        pred = torch.add(torch.bmm(model_points, base), pred_t)
+        R = torch.stack([
+            torch.stack([1 - 2*y*y - 2*z*z, 2*x*y - 2*w*z, 2*x*z + 2*w*y], dim=1),
+            torch.stack([2*x*y + 2*w*z, 1 - 2*x*x - 2*z*z, 2*y*z - 2*w*x], dim=1),
+            torch.stack([2*x*z - 2*w*y, 2*y*z + 2*w*x, 1 - 2*x*x - 2*y*y], dim=1)
+        ], dim=1)  # [B, 3, 3]
         
-        dis = torch.mean(torch.norm((pred - target), dim=2), dim=1)
-        if dis > 1:
-            print(f"pred_r: {pred_r}")
-            print(f"pred_r: {pred_t}")
-            scaled_dis = torch.clamp(dis, min=0.0, max=1.0)
-            return scaled_dis
-        # Compute distance loss
-        return dis.mean()
-    def compute_intervention_loss(self, relational_features: torch.Tensor, intervention: torch.Tensor) -> torch.Tensor:
+        # Transform model points
+        model_points = model_points[:, :self.num_points_mesh, :]  # [B, N, 3]
+        pred_points = torch.bmm(model_points, R.transpose(1, 2)) + pred_t.unsqueeze(1)
+        
+        # Compute distance
+        target = target[:, :self.num_points_mesh, :]
+        return torch.mean(torch.norm(pred_points - target, dim=2))
+    
+    def compute_causal_consistency_loss(self, features: Dict[str, torch.Tensor],
+                                      interventions: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
         """
-        Compute loss between relational features under intervention.
-
-        Args:
-            relational_features: Relational point features [B, C, N]
-            intervention: Transformation matrix [B, 4, 4] or [B, 3, 3]
-
-        Returns:
-            Loss value as a single tensor.
+        Ensure causal mechanisms are consistent under interventions
         """
-        B, C, N = relational_features.shape
-
-        # Validate intervention shape
-        if intervention.shape[-2:] == (3, 3):
-            # If intervention is [B, 3, 3], adjust homog_feats
-            features_points = relational_features.transpose(1, 2)  # [B, N, C]
-            spatial_feats = features_points[..., :3]  # [B, N, 3]
-            
-            ones = torch.ones(B, N, 1, device=relational_features.device)  # Homogeneous coordinate
-            homog_feats = torch.cat([spatial_feats, ones], dim=-1)  # [B, N, 4]
-            homog_feats = homog_feats[..., :3]  # Adjust for [B, 3, 3] intervention
-        elif intervention.shape[-2:] == (4, 4):
-            # If intervention is [B, 4, 4], process normally
-            features_points = relational_features.transpose(1, 2)  # [B, N, C]
-            spatial_feats = features_points[..., :3]  # [B, N, 3]
-
-            ones = torch.ones(B, N, 1, device=relational_features.device)  # Homogeneous coordinate
-            homog_feats = torch.cat([spatial_feats, ones], dim=-1)  # [B, N, 4]
-        else:
-            raise ValueError(f"Unexpected intervention shape {intervention.shape}, expected [B, 4, 4] or [B, 3, 3]")
-
-        # Apply transformation
-        transformed = torch.bmm(homog_feats, intervention.transpose(1, 2))
-        transformed = transformed[..., :3]  # Remove homogeneous coordinate if applicable
-
-        # Compute feature consistency loss
-        return F.mse_loss(transformed, spatial_feats)
-
-
-
-    def compute_backdoor_loss(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        loss = 0.0
+        
+        # Residuals should be predictive of pose updates
+        if 'residuals' in features and 'pose_update' in features:
+            # Simple consistency: residuals should correlate with magnitude of update
+            residual_norm = torch.norm(features['residuals'], dim=1)
+            update_norm = torch.norm(features['pose_update'], dim=1)
+            loss += F.mse_loss(residual_norm, update_norm)
+        
+        return loss
+    
+    def compute_intervention_robustness_loss(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        Compute backdoor adjustment loss between features.
-        
-        Args:
-            features: Dictionary containing 'relational' and 'global' features
+        Encourage robustness to interventions
         """
-        # Get features
-        point_feats = features['relational']  # [B, C, N]
-        global_feats = features['global']     # [B, C, 1]
-        
-        # Project point features onto global feature space
-        point_feats = F.normalize(point_feats, dim=1)  # Normalize along channel dimension
-        global_feats = F.normalize(global_feats, dim=1)
-        
-        # Compute correlation using batch matrix multiplication
-        similarity = torch.bmm(point_feats.transpose(1, 2), global_feats)  # [B, N, 1]
-        
-        # We want low correlation for backdoor adjustment
-        target = torch.zeros_like(similarity)
-        return F.mse_loss(similarity, target)
-
+        # Geometric features should maintain structure
+        if 'geometric' in features and 'global' in features['geometric']:
+            global_feat = features['geometric']['global']
+            # Encourage feature diversity
+            feat_cov = torch.mm(global_feat.t(), global_feat) / global_feat.size(0)
+            loss = -torch.logdet(feat_cov + 1e-4 * torch.eye(feat_cov.size(0)).cuda())
+            return loss
+        return torch.tensor(0.0).cuda()
+    
     def forward(self, pred_r: torch.Tensor, pred_t: torch.Tensor,
                 target: torch.Tensor, model_points: torch.Tensor,
-                points: torch.Tensor, features: Dict[str, torch.Tensor],
+                features: Dict[str, torch.Tensor],
                 interventions: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
         """
-        Forward pass computing all losses
+        Compute all losses
         """
-        # Ensure all inputs are on same device
-        device = pred_r.device
-
-        #features['relational'] = torch.nan_to_num(features['relational'], nan=0.0, posinf=1e6, neginf=-1e6)
-
-        
-        # Compute base pose loss
+        # Base pose loss
         pose_loss = self.compute_pose_loss(pred_r, pred_t, target, model_points)
         
-        # Initialize losses dictionary
-        losses = {'pose_loss': pose_loss}
-        # Compute intervention losses if provided
-        if interventions is not None:
-            if 'view' in interventions:
-                view_loss = self.compute_intervention_loss(features['relational'], interventions['view'])
-                losses['view_loss'] = view_loss
-                # print(f"view:{view_loss}")
-            ### ? why symmetry? difference?? 
-            if 'symmetry' in interventions:
-                sym_loss = self.compute_intervention_loss(features['relational'], interventions['symmetry'])
-                losses['symmetry_loss'] = sym_loss
-                # print(f"sym:{sym_loss}")
-
-        # Compute backdoor loss
-        backdoor_loss = self.compute_backdoor_loss(features).float()
-        losses['backdoor_loss'] = backdoor_loss
- 
-        # Compute total loss with weighting
-        total_loss = pose_loss.float()
-        for name, loss in losses.items():
-            if name != 'pose_loss':
-                total_loss = total_loss + 0.1 * loss.float()
-
-        losses['total_loss'] = total_loss
-
-
-        print(f"Pose Loss: {pose_loss}")
-
-        return losses
+        # Causal consistency
+        consistency_loss = self.compute_causal_consistency_loss(features, interventions)
+        
+        # Intervention robustness
+        robustness_loss = self.compute_intervention_robustness_loss(features)
+        
+        # Total loss
+        total_loss = pose_loss + 0.1 * consistency_loss + 0.05 * robustness_loss
+        
+        return {
+            'pose_loss': pose_loss,
+            'consistency_loss': consistency_loss,
+            'robustness_loss': robustness_loss,
+            'total_loss': total_loss
+        }

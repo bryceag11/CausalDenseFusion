@@ -79,7 +79,7 @@ def main():
     estimator = PoseNet(num_points = opt.num_points, num_obj = opt.num_objects)
     estimator.cuda()
     # refiner = PoseRefineNet(num_points = opt.num_points, num_obj = opt.num_objects)
-    refiner = SCMPoseRefiner(num_points=opt.num_points, num_obj=opt.num_objects).float()
+    refiner = SCMPoseRefiner(num_points=opt.num_points, num_obj=opt.num_objects).cuda()
     refiner.cuda()
 
     if opt.resume_posenet != '':
